@@ -1,323 +1,956 @@
-const upload = require('./upload');
+// ==========================================================
+// server.js
+// ==========================================================
+// Main backend file for Property + Inquiry Management System
+// Now supports:
+// - Multi-society architecture
+// - Admin-controlled data isolation
+// - JWT authentication
+// ==========================================================
+
+// Load environment variables
 require('dotenv').config();
+
+// Import required packages
 const express = require('express');
 const cors = require('cors');
-const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-require('dotenv').config();
+const bcrypt = require('bcrypt');
 
+// Import DB connection pool
 const pool = require('./db');
 
+// Create express app
 const app = express();
-console.log(process.env.JWT_SECRET);
-// ===============================
-// MIDDLEWARE
-// ===============================
+
+// Middleware
 app.use(cors());
 app.use(express.json());
 
-// ===============================
+// ==========================================================
 // AUTH MIDDLEWARE
-// ===============================
-const authenticateToken = (req, res, next) => {
+// ==========================================================
+
+// Verify JWT token
+function authenticateToken(req, res, next) {
   const authHeader = req.headers['authorization'];
 
-  // Expected format: Bearer <token>
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
+  if (!authHeader) {
     return res.status(401).json({ message: 'Access token missing' });
   }
 
+  const token = authHeader.split(' ')[1];
+
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) {
-      return res.status(403).json({ message: 'Invalid or expired token' });
+      return res.status(403).json({ message: 'Invalid token' });
     }
 
-    req.user = user;
+    req.user = user; // attach decoded user to request
     next();
   });
-};
+}
 
-// ===============================
-// ROLE CHECK MIDDLEWARE
-// ===============================
-const authorizeRoles = (...allowedRoles) => {
+// Role-based authorization
+function authorizeRoles(...roles) {
   return (req, res, next) => {
-    if (!req.user || !allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({ message: 'Access denied for this role' });
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json({ message: 'Access denied' });
     }
     next();
   };
-};
+}
+// ==========================================================
+// CREATE SOCIETY + ADMIN (SUPER ADMIN ONLY)
+// ==========================================================
 
-// ===============================
-// BASIC ROUTES
-// ===============================
-app.get('/', (req, res) => {
-  res.send('Server is running 🚀');
-});
+app.post(
+  '/societies',
+  authenticateToken,
+  authorizeRoles('platform_admin'),
+  async (req, res) => {
+    try {
 
-app.get('/test', (req, res) => {
-  res.json({ message: 'API is working ✅' });
-});
+      const {
+        society_name,
+        address,
+        city,
+        pincode,
+        admin_name,
+        admin_email,
+        admin_password
+      } = req.body;
+      
+      // System Generated Society Code
+      const society_code = `SD-${Date.now()}`;
 
-// ===============================
+      // 🔐 Hash admin password
+      const hashedPassword = await bcrypt.hash(admin_password, 10);
+
+      // 1️⃣ Create Society
+      const societyResult = await pool.query(
+        `INSERT INTO societies
+         (society_code, society_name, address, city, pincode, status)
+         VALUES ($1,$2,$3,$4,$5,'active')
+         RETURNING *`,
+        [society_code, society_name, address, city, pincode]
+      );
+
+      const society = societyResult.rows[0];
+
+      // 2️⃣ Create Society Admin
+      const adminResult = await pool.query(
+        `INSERT INTO users
+         (full_name, email, password, role, society_id)
+         VALUES ($1,$2,$3,'society_admin',$4)
+         RETURNING user_id, full_name, email, role, society_id`,
+        [
+          admin_name,
+          admin_email,
+          hashedPassword,
+          society.society_id
+        ]
+      );
+
+      res.status(201).json({
+        message: 'Society and Admin created successfully',
+        society,
+        admin: adminResult.rows[0]
+      });
+
+    } catch (err) {
+      console.error('Error creating society:', err);
+      res.status(500).json({
+        message: 'Failed to create society',
+        error: err.message
+      });
+    }
+  }
+);
+
+// ==========================================================
 // AUTH APIs
-// ===============================
+// ==========================================================
 
-// REGISTER USER
+// Register user
 app.post('/register', async (req, res) => {
   try {
-    const { full_name, email, phone, password, role } = req.body;
-
-    if (!full_name || !email || !password || !role) {
-      return res.status(400).json({ message: 'Required fields are missing' });
-    }
-
-    const existingUser = await pool.query(
-      'SELECT * FROM users WHERE email = $1 OR phone = $2',
-      [email, phone || null]
-    );
-
-    if (existingUser.rows.length > 0) {
-      return res.status(400).json({ message: 'User already exists with email or phone' });
-    }
+    const { full_name, email, phone, password, role, society_id } = req.body;
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
-      `INSERT INTO users (full_name, email, phone, password, role)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING user_id, full_name, email, phone, role, created_at`,
-      [full_name, email, phone || null, hashedPassword, role]
+      `INSERT INTO users (full_name, email, phone, password, role, society_id)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       RETURNING user_id, full_name, email, phone, role, society_id`,
+      [full_name, email, phone, hashedPassword, role, society_id]
     );
 
-    res.status(201).json({
-      message: 'User registered successfully',
-      user: result.rows[0]
-    });
+    res.status(201).json(result.rows[0]);
+
   } catch (err) {
-    console.error('Error registering user:', err);
+    console.error('Register error:', err);
     res.status(500).send('Server error');
   }
 });
 
-// LOGIN USER
+// Login
 app.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const result = await pool.query(
+    const userResult = await pool.query(
       'SELECT * FROM users WHERE email = $1',
       [email]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(400).json({ message: 'Invalid email or password' });
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ message: 'Invalid email or password' });
     }
 
-    const user = result.rows[0];
+    const user = userResult.rows[0];
 
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    const validPassword = await bcrypt.compare(password, user.password);
 
-    if (!isPasswordValid) {
-      return res.status(400).json({ message: 'Invalid email or password' });
+    if (!validPassword) {
+      return res.status(401).json({ message: 'Invalid email or password' });
     }
+// --------------------------------------------------
+// Block society_admin login if their society is inactive
+// --------------------------------------------------
+if (user.role === 'society_admin') {
+  const societyResult = await pool.query(
+    `SELECT status
+     FROM societies
+     WHERE society_id = $1`,
+    [user.society_id]
+  );
 
+  if (societyResult.rows.length === 0) {
+    return res.status(403).json({
+      message: 'Society is not found. Please contact platform admin.'
+    });
+  }
+
+  if (societyResult.rows[0].status !== 'active') {
+    return res.status(403).json({
+      message: 'Your society access is inactive. Please contact platform admin.'
+    });
+  }
+}
+    // Include society_id in token (IMPORTANT)
     const token = jwt.sign(
       {
         user_id: user.user_id,
         email: user.email,
-        role: user.role
+        role: user.role,
+        society_id: user.society_id
       },
       process.env.JWT_SECRET,
       { expiresIn: '1d' }
     );
 
     res.json({
-      message: 'Login successful',
       token,
       user: {
         user_id: user.user_id,
         full_name: user.full_name,
         email: user.email,
         phone: user.phone,
-        role: user.role
+        role: user.role,
+        society_id: user.society_id
       }
     });
+
   } catch (err) {
-    console.error('Error logging in:', err);
+    console.error('Login error:', err);
     res.status(500).send('Server error');
   }
 });
+// ==========================================================
+// GET ALL SOCIETIES - PLATFORM ADMIN ONLY
+// ==========================================================
+// Purpose:
+// - Platform admin can see all onboarded societies
+// - Used by "Societies" page in frontend
+// ==========================================================
 
-// ===============================
-// PROPERTY APIs
-// ===============================
+app.get(
+  '/societies',
+  authenticateToken,
+  authorizeRoles('platform_admin'),
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `SELECT 
+           society_id,
+           society_code,
+           society_name,
+           address,
+           city,
+           pincode,
+           status,
+           created_at
+         FROM societies
+         ORDER BY society_id DESC`
+      );
 
-// CREATE PROPERTY
-// Only society_admin should ideally create properties
+      res.json(result.rows);
+    } catch (err) {
+      console.error('Error fetching societies:', err);
+      res.status(500).json({ message: 'Failed to fetch societies' });
+    }
+  }
+);
+// ==========================================================
+// GET SINGLE SOCIETY - PLATFORM ADMIN ONLY
+// ==========================================================
+// Purpose:
+// - Used when editing society details
+// ==========================================================
+
+app.get(
+  '/societies/:id',
+  authenticateToken,
+  authorizeRoles('platform_admin'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const result = await pool.query(
+        `SELECT *
+         FROM societies
+         WHERE society_id = $1`,
+        [id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ message: 'Society not found' });
+      }
+
+      res.json(result.rows[0]);
+    } catch (err) {
+      console.error('Error fetching society:', err);
+      res.status(500).json({ message: 'Failed to fetch society' });
+    }
+  }
+);
+// ==========================================================
+// UPDATE SOCIETY - PLATFORM ADMIN ONLY
+// ==========================================================
+// Purpose:
+// Platform admin can update all society master details.
+// Society code is received but should remain unchanged from UI.
+// ==========================================================
+
+app.put(
+  '/societies/:id',
+  authenticateToken,
+  authorizeRoles('platform_admin'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const {
+        society_name,
+        address,
+        google_map_link,
+        apartment_count,
+        amenities,
+        lift_available,
+        lift_types,
+        visitor_parking,
+        visitor_parking_count,
+        entry_exit_points,
+        society_office_contact,
+        society_email,
+        city,
+        pincode,
+        status
+      } = req.body;
+
+      const result = await pool.query(
+        `UPDATE societies
+         SET
+           society_name = $1,
+           address = $2,
+           google_map_link = $3,
+           apartment_count = $4,
+           amenities = $5,
+           lift_available = $6,
+           lift_types = $7,
+           visitor_parking = $8,
+           visitor_parking_count = $9,
+           entry_exit_points = $10,
+           society_office_contact = $11,
+           society_email = $12,
+           city = $13,
+           pincode = $14,
+           status = $15
+         WHERE society_id = $16
+         RETURNING *`,
+        [
+          society_name,
+          address,
+          google_map_link || null,
+          apartment_count || null,
+          amenities || [],
+          lift_available || false,
+          lift_types || [],
+          visitor_parking || false,
+          visitor_parking_count || 0,
+          entry_exit_points || 1,
+          society_office_contact || null,
+          society_email || null,
+          city || null,
+          pincode || null,
+          status || 'active',
+          id
+        ]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ message: 'Society not found' });
+      }
+
+      res.json({
+        message: 'Society updated successfully',
+        society: result.rows[0]
+      });
+
+    } catch (err) {
+      console.error('Error updating society:', err);
+      res.status(500).json({
+        message: 'Failed to update society',
+        error: err.message
+      });
+    }
+  }
+);
+app.put(
+  '/properties/:id',
+  authenticateToken,
+  authorizeRoles('society_admin'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const {
+        wing_flat_no,
+        floor_no,
+        c_type,
+        carpet_area_sqft,
+        f_type,
+        furniture_details,
+        parking_type,
+        parking_count,
+        request_type,
+
+        expected_price,
+        negotiable,
+        bottom_price,
+        monthly_maintenance,
+
+        expected_rent,
+        expected_deposit,
+        bottom_rent_price,
+        bottom_deposit_price,
+
+        available_from,
+        property_description,
+        owner_name,
+        owner_contact,
+        admin_notes
+      } = req.body;
+
+      const result = await pool.query(
+        `UPDATE properties
+         SET
+           wing_flat_no = $1,
+           floor_no = $2,
+           c_type = $3,
+           carpet_area_sqft = $4,
+           f_type = $5,
+           furniture_details = $6,
+           parking_type = $7,
+           parking_count = $8,
+           request_type = $9,
+
+           a_type = $10,
+           price = $11,
+           negotiate = $12,
+
+           expected_price = $13,
+           negotiable = $14,
+           bottom_price = $15,
+           monthly_maintenance = $16,
+
+           expected_rent = $17,
+           expected_deposit = $18,
+           bottom_rent_price = $19,
+           bottom_deposit_price = $20,
+
+           available_from = $21,
+           property_description = $22,
+           owner_name = $23,
+           owner_contact = $24,
+           admin_notes = $25
+         WHERE prop_id = $26
+           AND society_id = $27
+         RETURNING *`,
+        [
+          wing_flat_no,
+          floor_no ? Number(floor_no) : null,
+          c_type,
+          carpet_area_sqft ? Number(carpet_area_sqft) : null,
+          f_type,
+          furniture_details || null,
+          parking_type,
+          parking_count ? Number(parking_count) : 0,
+          request_type,
+
+          request_type,
+          request_type === 'SALE'
+            ? Number(expected_price || 0)
+            : Number(expected_rent || 0),
+          negotiable === 'Yes',
+
+          expected_price ? Number(expected_price) : null,
+          negotiable || null,
+          bottom_price ? Number(bottom_price) : null,
+          monthly_maintenance ? Number(monthly_maintenance) : null,
+
+          expected_rent ? Number(expected_rent) : null,
+          expected_deposit ? Number(expected_deposit) : null,
+          bottom_rent_price ? Number(bottom_rent_price) : null,
+          bottom_deposit_price ? Number(bottom_deposit_price) : null,
+
+          available_from || null,
+          property_description || null,
+          owner_name || null,
+          owner_contact || null,
+          admin_notes || null,
+
+          id,
+          req.user.society_id
+        ]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ message: 'Property not found or not allowed' });
+      }
+
+      res.json({
+        message: 'Property updated successfully',
+        property: result.rows[0]
+      });
+
+    } catch (err) {
+      console.error('Update property error:', err);
+      res.status(500).json({
+        message: 'Failed to update property',
+        error: err.message
+      });
+    }
+  }
+);
+app.put("/properties/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = req.user;
+
+    const {
+      title,
+      location,
+      society_cd,
+      so_name,
+      so_location,
+      f_type,
+      c_type,
+      a_type,
+      price,
+      negotiate,
+      description,
+      area,
+      floor,
+      parking,
+      image_url
+    } = req.body;
+
+    let query = `
+      UPDATE properties
+      SET
+        title = $1,
+        location = $2,
+        society_cd = $3,
+        so_name = $4,
+        so_location = $5,
+        f_type = $6,
+        c_type = $7,
+        a_type = $8,
+        price = $9,
+        negotiate = $10,
+        description = $11,
+        area = $12,
+        floor = $13,
+        parking = $14,
+        image_url = $15
+      WHERE prop_id = $16
+    `;
+
+    let values = [
+      title,
+      location,
+      society_cd,
+      so_name,
+      so_location,
+      f_type,
+      c_type,
+      a_type,
+      price,
+      negotiate,
+      description,
+      area,
+      floor,
+      parking,
+      image_url,
+      id
+    ];
+
+    if (user.role === "society_admin") {
+      query += ` AND society_id = $17`;
+      values.push(user.society_id);
+    }
+
+    query += ` RETURNING *`;
+
+    const result = await pool.query(query, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Property not found or unauthorized" });
+    }
+
+    res.json({
+      message: "Property updated successfully",
+      property: result.rows[0],
+    });
+  } catch (err) {
+    console.error("Error updating property:", err);
+    res.status(500).json({ error: "Error updating property" });
+  }
+});
+// ==========================================================
+// CREATE PROPERTY - SOCIETY ADMIN ONLY
+// ==========================================================
+// Purpose:
+// - Society admin adds property under their mapped society
+// - Society ID/code/name are NOT taken from frontend
+// - Backend maps property using logged-in user's society_id
+// - Supports SALE and RENT specific fields
+// ==========================================================
+
 app.post(
   '/properties',
   authenticateToken,
   authorizeRoles('society_admin'),
   async (req, res) => {
     try {
+      // Logged-in society admin info from JWT token
+      const created_by = req.user.user_id;
+      const society_id = req.user.society_id;
+
+      // Property details from frontend
       const {
-        society_cd,
-        so_name,
-        so_location,
-        f_type,
+        wing_flat_no,
+        floor_no,
         c_type,
-        a_type,
-        price,
-        negotiate
+        carpet_area_sqft,
+        f_type,
+        furniture_details,
+        parking_type,
+        parking_count,
+        request_type,
+
+        expected_price,
+        negotiable,
+        bottom_price,
+        monthly_maintenance,
+
+        expected_rent,
+        expected_deposit,
+        bottom_rent_price,
+        bottom_deposit_price,
+
+        available_from,
+        property_description,
+        owner_name,
+        owner_contact,
+        admin_notes
       } = req.body;
 
-      const created_by = req.user.user_id;
+      // Fetch society master record using logged-in admin society_id
+      const societyResult = await pool.query(
+        `SELECT society_id, society_code, society_name, address
+         FROM societies
+         WHERE society_id = $1
+           AND status = 'active'`,
+        [society_id]
+      );
 
+      if (societyResult.rows.length === 0) {
+        return res.status(400).json({
+          message: 'Active society not found for logged-in admin'
+        });
+      }
+
+      const society = societyResult.rows[0];
+
+      // Insert property
       const result = await pool.query(
         `INSERT INTO properties
-         (society_cd, so_name, so_location, f_type, c_type, a_type, price, negotiate, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-         RETURNING *`,
-        [
+         (
+          society_id,
           society_cd,
           so_name,
           so_location,
-          f_type,
+
+          wing_flat_no,
+          floor_no,
           c_type,
+          carpet_area_sqft,
+          f_type,
+          furniture_details,
+          parking_type,
+          parking_count,
+          request_type,
+
           a_type,
           price,
           negotiate,
+
+          expected_price,
+          negotiable,
+          bottom_price,
+          monthly_maintenance,
+
+          expected_rent,
+          expected_deposit,
+          bottom_rent_price,
+          bottom_deposit_price,
+
+          available_from,
+          property_description,
+          owner_name,
+          owner_contact,
+          admin_notes,
+
+          property_status,
+          created_by
+         )
+         VALUES
+         (
+          $1,$2,$3,$4,
+          $5,$6,$7,$8,$9,$10,$11,$12,$13,
+          $14,$15,$16,
+          $17,$18,$19,$20,
+          $21,$22,$23,$24,
+          $25,$26,$27,$28,$29,
+          'AVAILABLE',$30
+         )
+         RETURNING *`,
+        [
+          society.society_id,
+          society.society_code,
+          society.society_name,
+          society.address,
+
+          wing_flat_no,
+          floor_no ? Number(floor_no) : null,
+          c_type,
+          carpet_area_sqft ? Number(carpet_area_sqft) : null,
+          f_type,
+          furniture_details || null,
+          parking_type,
+          parking_count ? Number(parking_count) : 0,
+          request_type,
+
+          // Existing old columns kept for compatibility with current UI/listing
+          request_type,
+          request_type === 'SALE'
+            ? Number(expected_price || 0)
+            : Number(expected_rent || 0),
+          negotiable === 'Yes',
+
+          expected_price ? Number(expected_price) : null,
+          negotiable || null,
+          bottom_price ? Number(bottom_price) : null,
+          monthly_maintenance ? Number(monthly_maintenance) : null,
+
+          expected_rent ? Number(expected_rent) : null,
+          expected_deposit ? Number(expected_deposit) : null,
+          bottom_rent_price ? Number(bottom_rent_price) : null,
+          bottom_deposit_price ? Number(bottom_deposit_price) : null,
+
+          available_from || null,
+          property_description || null,
+          owner_name || null,
+          owner_contact || null,
+          admin_notes || null,
+
           created_by
         ]
       );
 
-      res.status(201).json(result.rows[0]);
+      res.status(201).json({
+        message: 'Property added successfully',
+        property: result.rows[0]
+      });
+
     } catch (err) {
       console.error('Error creating property:', err);
-      res.status(500).send('Server error');
+      res.status(500).json({
+        message: 'Failed to create property',
+        error: err.message
+      });
     }
   }
 );
+// ==========================================================
+// GET SOCIETY PROPERTIES - SOCIETY ADMIN ONLY
+// ==========================================================
+// Purpose:
+// - Society admin should see all properties mapped to their society
+// - Do not depend only on created_by
+// - This supports multi-admin society usage in future
+// ==========================================================
 
-// GET ALL PROPERTIES
-app.get('/properties', async (req, res) => {
-  try {
-    const {
-      location,
-      c_type,
-      a_type,
-      min_price,
-      max_price,
-      page = 1,
-      limit = 5,
-      sort = 'latest'
-    } = req.query;
+app.get(
+  '/my-properties',
+  authenticateToken,
+  authorizeRoles('society_admin'),
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `SELECT *
+         FROM properties
+         WHERE society_id = $1
+         ORDER BY prop_id DESC`,
+        [req.user.society_id]
+      );
 
-    let query = 'SELECT * FROM properties WHERE 1=1';
-    let countQuery = 'SELECT COUNT(*) FROM properties WHERE 1=1';
-    const values = [];
+      res.json(result.rows);
 
-    // Filter by location
-    if (location) {
-      values.push(`%${location}%`);
-      query += ` AND so_location ILIKE $${values.length}`;
-      countQuery += ` AND so_location ILIKE $${values.length}`;
+    } catch (err) {
+      console.error('Error fetching society properties:', err);
+      res.status(500).json({
+        message: 'Failed to fetch society properties',
+        error: err.message
+      });
     }
-
-    // Filter by config
-    if (c_type) {
-      values.push(c_type);
-      query += ` AND c_type = $${values.length}`;
-      countQuery += ` AND c_type = $${values.length}`;
-    }
-
-    // Filter by transaction type
-    if (a_type) {
-      values.push(a_type);
-      query += ` AND a_type = $${values.length}`;
-      countQuery += ` AND a_type = $${values.length}`;
-    }
-
-    // Filter by minimum price
-    if (min_price) {
-      values.push(min_price);
-      query += ` AND price >= $${values.length}`;
-      countQuery += ` AND price >= $${values.length}`;
-    }
-
-    // Filter by maximum price
-    if (max_price) {
-      values.push(max_price);
-      query += ` AND price <= $${values.length}`;
-      countQuery += ` AND price <= $${values.length}`;
-    }
-
-    // Sorting
-    if (sort === 'price_asc') {
-      query += ' ORDER BY price ASC';
-    } else if (sort === 'price_desc') {
-      query += ' ORDER BY price DESC';
-    } else {
-      query += ' ORDER BY prop_id DESC'; // latest first
-    }
-
-    // Pagination
-    const pageNumber = parseInt(page);
-    const pageSize = parseInt(limit);
-    if (isNaN(pageNumber) || pageNumber < 1) {
-  return res.status(400).json({ message: 'Invalid page number' });
-}
-
-if (isNaN(pageSize) || pageSize < 1) {
-  return res.status(400).json({ message: 'Invalid limit value' });
-}
-    const offset = (pageNumber - 1) * pageSize;
-
-    values.push(pageSize);
-    query += ` LIMIT $${values.length}`;
-
-    values.push(offset);
-    query += ` OFFSET $${values.length}`;
-
-    // Execute queries
-    const dataResult = await pool.query(query, values);
-
-    const countValues = values.slice(0, values.length - 2); // exclude LIMIT/OFFSET
-    const countResult = await pool.query(countQuery, countValues);
-
-    const totalRecords = parseInt(countResult.rows[0].count);
-    const totalPages = Math.ceil(totalRecords / pageSize);
-
-    res.json({
-      page: pageNumber,
-      limit: pageSize,
-      totalRecords,
-      totalPages,
-      sort,
-      data: dataResult.rows
-    });
-  } catch (err) {
-    console.error('Error fetching paginated properties:', err);
-    res.status(500).send('Server error');
   }
-});
-// 🔹 GET SINGLE PROPERTY DETAILS
+);
+// ==========================================================
+// GET SOCIETY ADMIN DETAILS
+// ==========================================================
+
+app.get(
+  '/societies/:id/admin',
+  authenticateToken,
+  authorizeRoles('platform_admin'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const result = await pool.query(
+        `SELECT user_id, full_name, email, phone
+         FROM users
+         WHERE society_id = $1
+           AND role = 'society_admin'
+         LIMIT 1`,
+        [id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ message: 'Admin not found' });
+      }
+
+      res.json(result.rows[0]);
+
+    } catch (err) {
+      console.error('Error fetching admin:', err);
+      res.status(500).json({ message: 'Failed to fetch admin' });
+    }
+  }
+);
+// ==========================================================
+// UPDATE SOCIETY ADMIN DETAILS
+// ==========================================================
+
+app.put(
+  '/societies/:id/admin',
+  authenticateToken,
+  authorizeRoles('platform_admin'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { full_name, email, phone } = req.body;
+
+      const result = await pool.query(
+        `UPDATE users
+         SET full_name = $1,
+             email = $2,
+             phone = $3
+         WHERE society_id = $4
+           AND role = 'society_admin'
+         RETURNING user_id, full_name, email, phone`,
+        [full_name, email, phone, id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ message: 'Admin not found' });
+      }
+
+      res.json({
+        message: 'Admin updated successfully',
+        admin: result.rows[0]
+      });
+
+    } catch (err) {
+      console.error('Error updating admin:', err);
+
+      if (err.code === '23505') {
+        return res.status(400).json({
+          message: 'Email already exists'
+        });
+      }
+
+      res.status(500).json({ message: 'Failed to update admin' });
+    }
+  }
+);
+// ==========================================================
+// RESET SOCIETY ADMIN PASSWORD
+// ==========================================================
+
+app.put(
+  '/societies/:id/admin/reset-password',
+  authenticateToken,
+  authorizeRoles('platform_admin'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { new_password } = req.body;
+
+      if (!new_password) {
+        return res.status(400).json({
+          message: 'New password is required'
+        });
+      }
+
+      const hashedPassword = await bcrypt.hash(new_password, 10);
+
+      const result = await pool.query(
+        `UPDATE users
+         SET password = $1
+         WHERE society_id = $2
+           AND role = 'society_admin'
+         RETURNING user_id`,
+        [hashedPassword, id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ message: 'Admin not found' });
+      }
+
+      res.json({ message: 'Password reset successfully' });
+
+    } catch (err) {
+      console.error('Error resetting password:', err);
+      res.status(500).json({ message: 'Failed to reset password' });
+    }
+  }
+);
+// ==========================================================
+// GET SINGLE PROPERTY DETAILS
+// ==========================================================
+// Purpose:
+// - Used by Property Details page
+// - Returns one property by prop_id
+// - Also returns admin/owner details
+// ==========================================================
+
 app.get('/properties/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
     const result = await pool.query(
       `SELECT 
-        p.*,
-        u.full_name AS owner_name,
-        u.email AS owner_email,
-        u.phone AS owner_phone
+         p.*,
+         s.society_code,
+         s.society_name,
+         s.address AS society_address
        FROM properties p
-       LEFT JOIN users u ON p.created_by = u.user_id
+       LEFT JOIN societies s ON p.society_id = s.society_id
        WHERE p.prop_id = $1`,
       [id]
     );
@@ -333,185 +966,356 @@ app.get('/properties/:id', async (req, res) => {
     res.status(500).send('Server error');
   }
 });
-app.put('/properties/:id', authenticateToken, async (req, res) => {
+app.get("/properties/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const {
-      society_cd,
-      so_name,
-      so_location,
-      f_type,
-      c_type,
-      a_type,
-      price,
-      negotiate
-    } = req.body;
+    const user = req.user;
 
-    const propertyResult = await pool.query(
-      'SELECT * FROM properties WHERE prop_id = $1',
-      [id]
-    );
+    let query = `
+      SELECT *
+      FROM properties
+      WHERE prop_id = $1
+    `;
 
-    if (propertyResult.rows.length === 0) {
-      return res.status(404).json({ message: 'Property not found' });
+    let values = [id];
+
+    // Society admin can only access own society property
+    if (user.role === "society_admin") {
+      query += ` AND society_id = $2`;
+      values.push(user.society_id);
     }
 
-    const property = propertyResult.rows[0];
+    const result = await pool.query(query, values);
 
-    if (property.created_by !== req.user.user_id) {
-      return res.status(403).json({ message: 'Not authorized to edit this property' });
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Property not found or unauthorized" });
     }
 
-    const result = await pool.query(
-      `UPDATE properties
-       SET society_cd = $1,
-           so_name = $2,
-           so_location = $3,
-           f_type = $4,
-           c_type = $5,
-           a_type = $6,
-           price = $7,
-           negotiate = $8
-       WHERE prop_id = $9
-       RETURNING *`,
-      [society_cd, so_name, so_location, f_type, c_type, a_type, price, negotiate, id]
-    );
-
-    res.json({
-      message: 'Property updated successfully',
-      property: result.rows[0]
-    });
-
+    res.json(result.rows[0]);
   } catch (err) {
-    console.error('Update property error:', err);
-    res.status(500).send('Server error');
+    console.error("Error fetching property:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// ==========================================================
+// SOCIETY SUMMARY DASHBOARD - PLATFORM ADMIN ONLY
+// ==========================================================
+// Purpose:
+// - Platform admin can see high-level metrics for one society
+// - Used by Society Details dashboard page
+// ==========================================================
+
 app.get(
-  '/my-properties',
+  '/societies/:id/summary',
   authenticateToken,
-  authorizeRoles('society_admin'),
+  authorizeRoles('platform_admin'),
   async (req, res) => {
     try {
-      const result = await pool.query(
-        `SELECT *
-         FROM properties
-         WHERE created_by = $1
-         ORDER BY prop_id DESC`,
-        [req.user.user_id]
-      );
-
-      res.json(result.rows);
-    } catch (err) {
-      console.error('Error fetching my properties:', err);
-      res.status(500).send('Server error');
-    }
-  }
-)
-// --------------------------------------------------
-// Upload a real image file for a property
-// This version handles multer/cloudinary errors clearly
-// --------------------------------------------------
-app.post('/properties/:id/upload-image', authenticateToken, (req, res) => {
-  // Call multer middleware manually so we can catch upload errors
-  upload.single('image')(req, res, async (err) => {
-    try {
-      // ------------------------------------------
-      // STEP 1: Handle upload middleware errors
-      // ------------------------------------------
-      if (err) {
-        console.error('Multer/Cloudinary upload error:', err);
-
-        return res.status(400).json({
-          message: 'Upload middleware failed',
-          error: err.message || 'Unknown upload error'
-        });
-      }
-
-      // ------------------------------------------
-      // STEP 2: Confirm request reached backend
-      // ------------------------------------------
-      console.log('Upload route hit successfully');
-      console.log('Property ID:', req.params.id);
-      console.log('Uploaded file object:', req.file);
-
       const { id } = req.params;
 
-      // ------------------------------------------
-      // STEP 3: Check property exists
-      // ------------------------------------------
-      const propertyResult = await pool.query(
-        'SELECT * FROM properties WHERE prop_id = $1',
+      // 1. Fetch society basic details
+      const societyResult = await pool.query(
+        `SELECT *
+         FROM societies
+         WHERE society_id = $1`,
         [id]
       );
 
-      if (propertyResult.rows.length === 0) {
-        return res.status(404).json({ message: 'Property not found' });
+      if (societyResult.rows.length === 0) {
+        return res.status(404).json({ message: 'Society not found' });
       }
 
-      const property = propertyResult.rows[0];
+      const society = societyResult.rows[0];
 
-      // ------------------------------------------
-      // STEP 4: Check ownership
-      // Only property owner/admin can upload image
-      // ------------------------------------------
-      if (property.created_by !== req.user.user_id) {
-        return res.status(403).json({
-          message: 'Not authorized to upload image for this property'
-        });
-      }
-
-      // ------------------------------------------
-      // STEP 5: Validate uploaded file path
-      // Cloudinary URL should be available in req.file.path
-      // ------------------------------------------
-      const imageUrl = req.file?.path;
-
-      if (!imageUrl) {
-        return res.status(400).json({
-          message: 'Image upload failed',
-          error: 'No file URL returned from Cloudinary'
-        });
-      }
-
-      console.log('Image uploaded to Cloudinary:', imageUrl);
-
-      // ------------------------------------------
-      // STEP 6: Save image URL into DB
-      // ------------------------------------------
-      const result = await pool.query(
-        `INSERT INTO property_images (property_id, image_url)
-         VALUES ($1, $2)
-         RETURNING *`,
-        [id, imageUrl]
+      // 2. Count properties for this society
+      const propertyCountResult = await pool.query(
+        `SELECT COUNT(*)::int AS total_properties
+         FROM properties
+         WHERE society_id = $1`,
+        [id]
       );
 
-      // ------------------------------------------
-      // STEP 7: Return success response
-      // ------------------------------------------
-      res.status(201).json({
-        message: 'Image uploaded successfully',
-        image: result.rows[0]
+      // 3. Count inquiries for this society
+      const inquiryCountResult = await pool.query(
+        `SELECT COUNT(*)::int AS total_inquiries
+         FROM inquiries
+         WHERE society_id = $1`,
+        [id]
+      );
+
+      // 4. Count society admins for this society
+      const adminCountResult = await pool.query(
+        `SELECT COUNT(*)::int AS total_admins
+         FROM users
+         WHERE society_id = $1
+           AND role = 'society_admin'`,
+        [id]
+      );
+
+      // 5. Fetch recent inquiries
+      const recentInquiryResult = await pool.query(
+        `SELECT 
+           i.inquiry_id,
+           i.name,
+           i.phone,
+           i.message,
+           i.status,
+           i.created_at,
+           p.so_name,
+           p.price
+         FROM inquiries i
+         LEFT JOIN properties p ON i.property_id = p.prop_id
+         WHERE i.society_id = $1
+         ORDER BY i.inquiry_id DESC
+         LIMIT 5`,
+        [id]
+      );
+
+      res.json({
+        society,
+        stats: {
+          total_properties: propertyCountResult.rows[0].total_properties,
+          total_inquiries: inquiryCountResult.rows[0].total_inquiries,
+          total_admins: adminCountResult.rows[0].total_admins
+        },
+        recent_inquiries: recentInquiryResult.rows
       });
 
-    } catch (error) {
-      console.error('Upload route runtime error:', error);
-
+    } catch (err) {
+      console.error('Error fetching society summary:', err);
       res.status(500).json({
-        message: 'Image upload failed',
-        error: error.message || 'Server error'
+        message: 'Failed to fetch society summary',
+        error: err.message
       });
     }
-  });
-});
-app.delete('/properties/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
+  }
+);
+// ==========================================================
+// CREATE SOCIETY + FIRST SOCIETY ADMIN
+// PLATFORM ADMIN ONLY
+// ==========================================================
+// Purpose:
+// - Platform admin onboards a new society
+// - Society code comes from frontend as auto-generated read-only value
+// - Creates first society admin login for that society
+// ==========================================================
 
-    // 1. Check property exists
+app.post(
+  '/societies',
+  authenticateToken,
+  authorizeRoles('platform_admin'),
+  async (req, res) => {
+    try {
+      // ------------------------------
+      // 1. Read society details
+      // ------------------------------
+      const {
+        society_code,
+        society_name,
+        address,
+        google_map_link,
+        apartment_count,
+        amenities,
+        lift_available,
+        lift_types,
+        visitor_parking,
+        visitor_parking_count,
+        entry_exit_points,
+
+        // ------------------------------
+        // 2. Read society admin details
+        // ------------------------------
+        admin_name,
+        admin_contact_number,
+        society_office_contact,
+        admin_email,
+        society_email,
+        admin_password
+      } = req.body;
+
+      // ------------------------------
+      // 3. Basic validations
+      // ------------------------------
+      if (!society_code || !society_name || !address) {
+        return res.status(400).json({
+          message: 'Society code, name and address are required'
+        });
+      }
+
+      if (!admin_name || !admin_email || !admin_password) {
+        return res.status(400).json({
+          message: 'Admin name, email and password are required'
+        });
+      }
+
+      // ------------------------------
+      // 4. Hash society admin password
+      // ------------------------------
+      const hashedPassword = await bcrypt.hash(admin_password, 10);
+
+      // ------------------------------
+      // 5. Create society record
+      // ------------------------------
+      const societyResult = await pool.query(
+        `INSERT INTO societies
+         (
+          society_code,
+          society_name,
+          address,
+          google_map_link,
+          apartment_count,
+          amenities,
+          lift_available,
+          lift_types,
+          visitor_parking,
+          visitor_parking_count,
+          entry_exit_points,
+          society_office_contact,
+          society_email,
+          city,
+          pincode,
+          status
+         )
+         VALUES
+         (
+          $1, $2, $3, $4, $5, $6, $7, $8,
+          $9, $10, $11, $12, $13, $14, $15, 'active'
+         )
+         RETURNING *`,
+        [
+          society_code,
+          society_name,
+          address,
+          google_map_link || null,
+          apartment_count || null,
+          amenities || [],
+          lift_available || false,
+          lift_types || [],
+          visitor_parking || false,
+          visitor_parking_count || 0,
+          entry_exit_points || 1,
+          society_office_contact || null,
+          society_email || null,
+
+          // Keeping city/pincode for existing DB compatibility
+          req.body.city || null,
+          req.body.pincode || null
+        ]
+      );
+
+      const society = societyResult.rows[0];
+
+      // ------------------------------
+      // 6. Create first society admin
+      // ------------------------------
+      const adminResult = await pool.query(
+        `INSERT INTO users
+         (
+          full_name,
+          email,
+          phone,
+          password,
+          role,
+          society_id
+         )
+         VALUES ($1, $2, $3, $4, 'society_admin', $5)
+         RETURNING user_id, full_name, email, phone, role, society_id`,
+        [
+          admin_name,
+          admin_email,
+          admin_contact_number || null,
+          hashedPassword,
+          society.society_id
+        ]
+      );
+
+      // ------------------------------
+      // 7. Return success response
+      // ------------------------------
+      res.status(201).json({
+        message: 'Society and society admin created successfully',
+        society,
+        admin: adminResult.rows[0]
+      });
+
+    } catch (err) {
+      console.error('Error creating society:', err);
+
+      // Duplicate society code or admin email
+      if (err.code === '23505') {
+        return res.status(400).json({
+          message: 'Society code or admin email already exists'
+        });
+      }
+
+      res.status(500).json({
+        message: 'Failed to create society',
+        error: err.message
+      });
+    }
+  }
+);
+// ==========================================================
+// GET LOGGED-IN ADMIN'S SOCIETY
+// ==========================================================
+// Purpose:
+// - Society admin should see their assigned society details
+// - Used on Add Property page to display society code/name
+// - Society code/name are read-only on frontend
+// ==========================================================
+
+app.get(
+  '/my-society',
+  authenticateToken,
+  authorizeRoles('society_admin'),
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `SELECT 
+           society_id,
+           society_code,
+           society_name,
+           address,
+           city,
+           pincode,
+           status
+         FROM societies
+         WHERE society_id = $1`,
+        [req.user.society_id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: 'Society not found for logged-in admin'
+        });
+      }
+
+      res.json(result.rows[0]);
+
+    } catch (err) {
+      console.error('Error fetching my society:', err);
+      res.status(500).json({
+        message: 'Failed to fetch society details'
+      });
+    }
+  }
+);
+// ==========================================================
+// INQUIRY APIs
+// ==========================================================
+
+// Create inquiry (auto map to society)
+app.post('/inquiry', authenticateToken, async (req, res) => {
+  try {
+    const { property_id, message } = req.body;
+
+    const user = req.user;
+
+    // Fetch property to get society_id
     const propertyResult = await pool.query(
-      'SELECT * FROM properties WHERE prop_id = $1',
-      [id]
+      'SELECT prop_id, society_id FROM properties WHERE prop_id = $1',
+      [property_id]
     );
 
     if (propertyResult.rows.length === 0) {
@@ -520,242 +1324,108 @@ app.delete('/properties/:id', authenticateToken, async (req, res) => {
 
     const property = propertyResult.rows[0];
 
-    // 2. Check ownership
-    if (property.created_by !== req.user.user_id) {
-      return res.status(403).json({ message: 'Not authorized to delete this property' });
-    }
-
-    // 3. Check if inquiries exist
-    const inquiryResult = await pool.query(
-      'SELECT inquiry_id FROM inquiries WHERE property_id = $1 LIMIT 1',
-      [id]
+    const result = await pool.query(
+      `INSERT INTO inquiries
+       (property_id, user_id, name, phone, message, society_id)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       RETURNING *`,
+      [
+        property_id,
+        user.user_id,
+        user.email,
+        '', // phone optional
+        message,
+        property.society_id
+      ]
     );
 
-    if (inquiryResult.rows.length > 0) {
-      return res.status(400).json({
-        message: 'Cannot delete property because inquiries already exist for it'
-      });
-    }
-
-    // 4. Delete property
-    await pool.query(
-      'DELETE FROM properties WHERE prop_id = $1',
-      [id]
-    );
-
-    res.json({ message: 'Property deleted successfully' });
+    res.status(201).json(result.rows[0]);
 
   } catch (err) {
-    console.error('Delete property error:', err);
+    console.error('Error creating inquiry:', err);
     res.status(500).send('Server error');
   }
 });
+// ==========================================================
+// UPDATE INQUIRY STATUS / VISIT / NOTES
+// ==========================================================
 
-// ===============================
-// INQUIRY APIs
-// ===============================
-
-// CREATE INQUIRY
-// Buyer / tenant / society_admin can be allowed, but typically buyer/tenant
-app.post(
-  '/inquiry',
-  authenticateToken,
-  authorizeRoles('buyer', 'tenant'),
-  async (req, res) => {
-    try {
-      const { property_id, message } = req.body;
-
-      const userResult = await pool.query(
-        'SELECT user_id, full_name, phone FROM users WHERE user_id = $1',
-        [req.user.user_id]
-      );
-
-      if (userResult.rows.length === 0) {
-        return res.status(404).json({ message: 'User not found' });
-      }
-
-      const user = userResult.rows[0];
-
-      const result = await pool.query(
-        `INSERT INTO inquiries (property_id, user_id, name, phone, message)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING *`,
-        [property_id, user.user_id, user.full_name, user.phone, message]
-      );
-
-      res.status(201).json(result.rows[0]);
-
-    } catch (err) {
-      // 👇 Handle duplicate inquiry
-      if (err.code === '23505') {
-        return res.status(400).json({
-          message: 'You have already sent an inquiry for this property'
-        });
-      }
-
-      console.error('Error creating inquiry:', err);
-      res.status(500).send('Server error');
-    }
-  }
-);
-
-// GET ALL INQUIRIES WITH PROPERTY DETAILS
-app.get(
-  '/inquiries',
-  authenticateToken,
-  authorizeRoles('society_admin'),
-  async (req, res) => {
-    try {
-      const result = await pool.query(`
-        SELECT
-          i.inquiry_id,
-          i.user_id,
-          i.property_id,
-          i.name,
-          i.phone,
-          i.message,
-          i.status,
-          i.created_at,
-          p.society_cd,
-          p.so_name,
-          p.so_location,
-          p.f_type,
-          p.c_type,
-          p.a_type,
-          p.price,
-          p.negotiate,
-          p.created_by
-        FROM inquiries i
-        JOIN properties p ON i.property_id = p.prop_id
-        WHERE p.created_by = $1
-        ORDER BY i.inquiry_id DESC
-      `, [req.user.user_id]);
-
-      res.json(result.rows);
-    } catch (err) {
-      console.error('Error fetching inquiries:', err);
-      res.status(500).send('Server error');
-    }
-  }
-);  
-
-// UPDATE INQUIRY STATUS
 app.patch(
   '/inquiry/:id',
   authenticateToken,
   authorizeRoles('society_admin'),
   async (req, res) => {
     try {
-      const { status } = req.body;
       const { id } = req.params;
 
-      console.log('Updating inquiry:', id, 'to status:', status);
+      const { status, visit_date, visit_time, notes } = req.body;
 
-      let updateQuery = '';
-      let values = [status, id];
-
-      if (status === 'contacted') {
-        updateQuery = `
-          UPDATE inquiries
-          SET status = $1, contacted_at = CURRENT_TIMESTAMP
-          WHERE inquiry_id = $2
-          RETURNING *`;
-      } else if (status === 'visit_scheduled') {
-        updateQuery = `
-          UPDATE inquiries
-          SET status = $1, visit_scheduled_at = CURRENT_TIMESTAMP
-          WHERE inquiry_id = $2
-          RETURNING *`;
-      } else if (status === 'closed' || status === 'rejected') {
-        updateQuery = `
-          UPDATE inquiries
-          SET status = $1, closed_at = CURRENT_TIMESTAMP
-          WHERE inquiry_id = $2
-          RETURNING *`;
-      } else {
-        updateQuery = `
-          UPDATE inquiries
-          SET status = $1
-          WHERE inquiry_id = $2
-          RETURNING *`;
-      }
-
-      const result = await pool.query(updateQuery, values);
+      const result = await pool.query(
+        `UPDATE inquiries
+         SET 
+           status = COALESCE($1, status),
+           visit_date = COALESCE($2, visit_date),
+           visit_time = COALESCE($3, visit_time),
+           notes = COALESCE($4, notes)
+         WHERE inquiry_id = $5
+           AND society_id = $6
+         RETURNING *`,
+        [
+          status,
+          visit_date,
+          visit_time,
+          notes,
+          id,
+          req.user.society_id
+        ]
+      );
 
       if (result.rows.length === 0) {
         return res.status(404).json({ message: 'Inquiry not found' });
       }
 
       res.json(result.rows[0]);
+
     } catch (err) {
       console.error('Error updating inquiry:', err);
       res.status(500).send('Server error');
     }
   }
 );
+// ==========================================================
+// GET INQUIRIES (STRICT SOCIETY FILTER)
+// ==========================================================
 
-// Add image URL for a property
-app.post('/properties/:id/images', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { image_url } = req.body;
+app.get(
+  '/inquiries',
+  authenticateToken,
+  authorizeRoles('society_admin'),
+  async (req, res) => {
+    try {
 
-    // Check property exists
-    const propertyResult = await pool.query(
-      'SELECT * FROM properties WHERE prop_id = $1',
-      [id]
-    );
+      console.log("Logged-in user:", req.user); // debug
 
-    if (propertyResult.rows.length === 0) {
-      return res.status(404).json({ message: 'Property not found' });
+      const result = await pool.query(
+        `SELECT i.*, p.so_name, p.price
+         FROM inquiries i
+         JOIN properties p ON i.property_id = p.prop_id
+         WHERE p.society_id = $1   -- 🔴 IMPORTANT CHANGE
+         ORDER BY i.inquiry_id DESC`,
+        [req.user.society_id]
+      );
+
+      res.json(result.rows);
+
+    } catch (err) {
+      console.error('Error fetching inquiries:', err);
+      res.status(500).send('Server error');
     }
-
-    const property = propertyResult.rows[0];
-
-    // Ensure only owner can add image
-    if (property.created_by !== req.user.user_id) {
-      return res.status(403).json({ message: 'Not authorized to add image to this property' });
-    }
-
-    const result = await pool.query(
-      `INSERT INTO property_images (property_id, image_url)
-       VALUES ($1, $2)
-       RETURNING *`,
-      [id, image_url]
-    );
-
-    res.status(201).json({
-      message: 'Image added successfully',
-      image: result.rows[0]
-    });
-
-  } catch (err) {
-    console.error('Add image error:', err);
-    res.status(500).send('Server error');
   }
-});
+);
+// ==========================================================
+// SERVER START
+// ==========================================================
 
-// Get images for one property
-app.get('/properties/:id/images', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await pool.query(
-      'SELECT * FROM property_images WHERE property_id = $1 ORDER BY image_id DESC',
-      [id]
-    );
-
-    res.json(result.rows);
-
-  } catch (err) {
-    console.error('Fetch images error:', err);
-    res.status(500).send('Server error');
-  }
-});
-
-// ===============================
-// START SERVER
-// ===============================
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
