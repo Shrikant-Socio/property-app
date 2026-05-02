@@ -27,6 +27,10 @@ const pool = require("./db");
 
 const app = express();
 
+const upload = require('./upload');
+
+const cloudinary = require("./cloudinary");
+
 app.use(cors());
 app.use(express.json());
 
@@ -981,34 +985,66 @@ app.get(
   }
 );
 
-app.get("/properties/:id", authenticateToken, async (req, res) => {
+// ==========================================================
+// PUBLIC PROPERTY LIST API
+// ==========================================================
+// Purpose:
+// - Guest/buyer can view all available properties
+// - Society admins list their own properties using /my-properties
+// - Platform admin should not use this as admin dashboard
+// ==========================================================
+
+app.get("/properties", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT 
+         p.*,
+         s.society_code,
+         s.society_name,
+         s.address AS society_address
+       FROM properties p
+       LEFT JOIN societies s ON p.society_id = s.society_id
+       WHERE COALESCE(p.property_status, 'AVAILABLE') = 'AVAILABLE'
+       ORDER BY p.prop_id DESC`
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Error fetching public properties:", err);
+
+    res.status(500).json({
+      message: "Failed to fetch properties",
+      error: err.message
+    });
+  }
+});
+
+// ==========================================================
+// PUBLIC PROPERTY DETAILS API
+// ==========================================================
+// Anyone can view property details.
+// Society admin restrictions are handled only in edit/update APIs.
+// ==========================================================
+
+app.get("/properties/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    let query = `
-      SELECT 
-        p.*,
-        s.society_code,
-        s.society_name,
-        s.address AS society_address
-      FROM properties p
-      LEFT JOIN societies s ON p.society_id = s.society_id
-      WHERE p.prop_id = $1
-    `;
-
-    const values = [id];
-
-    // Society admin can only access own society property
-    if (req.user.role === "society_admin") {
-      query += ` AND p.society_id = $2`;
-      values.push(req.user.society_id);
-    }
-
-    const result = await pool.query(query, values);
+    const result = await pool.query(
+      `SELECT 
+         p.*,
+         s.society_code,
+         s.society_name,
+         s.address AS society_address
+       FROM properties p
+       LEFT JOIN societies s ON p.society_id = s.society_id
+       WHERE p.prop_id = $1`,
+      [id]
+    );
 
     if (result.rows.length === 0) {
       return res.status(404).json({
-        message: "Property not found or unauthorized",
+        message: "Property not found"
       });
     }
 
@@ -1018,7 +1054,7 @@ app.get("/properties/:id", authenticateToken, async (req, res) => {
 
     res.status(500).json({
       message: "Failed to fetch property",
-      error: err.message,
+      error: err.message
     });
   }
 });
@@ -1315,6 +1351,689 @@ app.get(
         message: "Failed to fetch society summary",
         error: err.message,
       });
+    }
+  }
+);
+
+// ==========================================================
+// PROPERTY IMAGE APIs - PRODUCTION READY VERSION
+// ==========================================================
+// Features:
+// - Upload max 10 images per property
+// - Store Cloudinary secure URL + public_id
+// - Public image fetch for buyers/guests
+// - Society admin ownership validation
+// - Delete image from Cloudinary + DB
+// - Set only one cover image per property
+// - Reorder display_order safely
+//
+// IMPORTANT:
+// - This replaces your old image APIs.
+// - Existing old endpoint POST /properties/:id/upload-image is kept
+//   for backward compatibility with current frontend.
+// ==========================================================
+
+// ----------------------------------------------------------
+// Helper: Validate that logged-in society_admin owns property
+// ----------------------------------------------------------
+async function validatePropertyOwnership(propertyId, societyId) {
+  const result = await pool.query(
+    `SELECT prop_id, society_id
+     FROM properties
+     WHERE prop_id = $1
+       AND society_id = $2`,
+    [propertyId, societyId]
+  );
+
+  return result.rows[0] || null;
+}
+
+// ----------------------------------------------------------
+// Helper: Delete uploaded Cloudinary files if DB validation fails
+// ----------------------------------------------------------
+async function cleanupUploadedFiles(files = []) {
+  for (const file of files) {
+    const publicId = file.filename || file.public_id;
+
+    if (publicId) {
+      try {
+        await cloudinary.uploader.destroy(publicId);
+      } catch (err) {
+        console.error("Cloudinary cleanup failed:", err.message);
+      }
+    }
+  }
+}
+
+// ----------------------------------------------------------
+// Middleware wrapper for multiple image upload
+// Field name expected: images
+// ----------------------------------------------------------
+function uploadPropertyImages(req, res, next) {
+  upload.array("images", 10)(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({
+        message: err.message || "Image upload failed",
+      });
+    }
+
+    next();
+  });
+}
+
+// ----------------------------------------------------------
+// Middleware wrapper for old single image upload
+// Field name expected: image
+// Kept for backward compatibility
+// ----------------------------------------------------------
+function uploadSinglePropertyImage(req, res, next) {
+  upload.single("image")(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({
+        message: err.message || "Image upload failed",
+      });
+    }
+
+    next();
+  });
+}
+
+// ==========================================================
+// 1) GET PROPERTY IMAGES - PUBLIC
+// ==========================================================
+// Buyers/tenants/guests can view property images.
+// Cover image appears first, then display_order, then image_id.
+// ==========================================================
+
+app.get("/properties/:id/images", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const propertyCheck = await pool.query(
+      `SELECT prop_id
+       FROM properties
+       WHERE prop_id = $1`,
+      [id]
+    );
+
+    if (propertyCheck.rows.length === 0) {
+      return res.status(404).json({
+        message: "Property not found",
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT
+         image_id,
+         property_id,
+         image_url,
+         public_id,
+         display_order,
+         is_cover,
+         uploaded_by,
+         created_at
+       FROM property_images
+       WHERE property_id = $1
+       ORDER BY
+         is_cover DESC,
+         display_order ASC,
+         image_id ASC`,
+      [id]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Fetch property images error:", err);
+
+    res.status(500).json({
+      message: "Failed to fetch property images",
+      error: err.message,
+    });
+  }
+});
+
+// ==========================================================
+// 2) UPLOAD MULTIPLE PROPERTY IMAGES - NEW API
+// ==========================================================
+// API:
+// POST /properties/:id/images
+//
+// Form-data:
+// images = file(s)
+//
+// Rules:
+// - society_admin only
+// - property must belong to logged-in admin society
+// - max 10 total images per property
+// - first uploaded image becomes cover if property has no cover
+// ==========================================================
+
+app.post(
+  "/properties/:id/images",
+  authenticateToken,
+  authorizeRoles("society_admin"),
+  uploadPropertyImages,
+  async (req, res) => {
+    const { id } = req.params;
+
+    try {
+      const property = await validatePropertyOwnership(
+        id,
+        req.user.society_id
+      );
+
+      if (!property) {
+        await cleanupUploadedFiles(req.files || []);
+
+        return res.status(404).json({
+          message: "Property not found or unauthorized",
+        });
+      }
+
+      const files = req.files || [];
+
+      if (files.length === 0) {
+        return res.status(400).json({
+          message: "At least one image file is required",
+        });
+      }
+
+      const countResult = await pool.query(
+        `SELECT COUNT(*)::int AS image_count
+         FROM property_images
+         WHERE property_id = $1`,
+        [id]
+      );
+
+      const existingCount = countResult.rows[0].image_count;
+
+      if (existingCount + files.length > 10) {
+        await cleanupUploadedFiles(files);
+
+        return res.status(400).json({
+          message: `Maximum 10 images are allowed per property. Current images: ${existingCount}`,
+        });
+      }
+
+      const coverCheck = await pool.query(
+        `SELECT image_id
+         FROM property_images
+         WHERE property_id = $1
+           AND is_cover = true
+         LIMIT 1`,
+        [id]
+      );
+
+      const hasCoverImage = coverCheck.rows.length > 0;
+
+      const client = await pool.connect();
+
+      try {
+        await client.query("BEGIN");
+
+        const insertedImages = [];
+
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+
+          const imageUrl = file.path;
+          const publicId = file.filename || file.public_id || null;
+
+          const shouldBeCover = !hasCoverImage && existingCount === 0 && i === 0;
+
+          const insertResult = await client.query(
+            `INSERT INTO property_images
+             (
+               property_id,
+               image_url,
+               public_id,
+               display_order,
+               is_cover,
+               uploaded_by
+             )
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING *`,
+            [
+              id,
+              imageUrl,
+              publicId,
+              existingCount + i,
+              shouldBeCover,
+              req.user.user_id,
+            ]
+          );
+
+          insertedImages.push(insertResult.rows[0]);
+        }
+
+        await client.query("COMMIT");
+
+        res.status(201).json({
+          message: "Property image(s) uploaded successfully",
+          images: insertedImages,
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        await cleanupUploadedFiles(files);
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      console.error("Upload property images error:", err);
+
+      res.status(500).json({
+        message: "Failed to upload property image(s)",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// ==========================================================
+// 3) OLD SINGLE IMAGE UPLOAD API - BACKWARD COMPATIBLE
+// ==========================================================
+// API:
+// POST /properties/:id/upload-image
+//
+// Form-data:
+// image = file
+//
+// This keeps your existing frontend working.
+// Internally it now stores public_id, display_order, uploaded_by, cover.
+// ==========================================================
+
+app.post(
+  "/properties/:id/upload-image",
+  authenticateToken,
+  authorizeRoles("society_admin"),
+  uploadSinglePropertyImage,
+  async (req, res) => {
+    const { id } = req.params;
+
+    try {
+      const property = await validatePropertyOwnership(
+        id,
+        req.user.society_id
+      );
+
+      if (!property) {
+        await cleanupUploadedFiles(req.file ? [req.file] : []);
+
+        return res.status(404).json({
+          message: "Property not found or unauthorized",
+        });
+      }
+
+      if (!req.file || !req.file.path) {
+        return res.status(400).json({
+          message: "Image file is required",
+        });
+      }
+
+      const countResult = await pool.query(
+        `SELECT COUNT(*)::int AS image_count
+         FROM property_images
+         WHERE property_id = $1`,
+        [id]
+      );
+
+      const existingCount = countResult.rows[0].image_count;
+
+      if (existingCount >= 10) {
+        await cleanupUploadedFiles([req.file]);
+
+        return res.status(400).json({
+          message: "Maximum 10 images are allowed per property",
+        });
+      }
+
+      const coverCheck = await pool.query(
+        `SELECT image_id
+         FROM property_images
+         WHERE property_id = $1
+           AND is_cover = true
+         LIMIT 1`,
+        [id]
+      );
+
+      const shouldBeCover = coverCheck.rows.length === 0 && existingCount === 0;
+
+      const result = await pool.query(
+        `INSERT INTO property_images
+         (
+           property_id,
+           image_url,
+           public_id,
+           display_order,
+           is_cover,
+           uploaded_by
+         )
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [
+          id,
+          req.file.path,
+          req.file.filename || req.file.public_id || null,
+          existingCount,
+          shouldBeCover,
+          req.user.user_id,
+        ]
+      );
+
+      res.status(201).json({
+        message: "Image uploaded successfully",
+        image: result.rows[0],
+      });
+    } catch (err) {
+      console.error("Upload single property image error:", err);
+
+      res.status(500).json({
+        message: "Image upload failed",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// ==========================================================
+// 4) DELETE PROPERTY IMAGE
+// ==========================================================
+// API:
+// DELETE /properties/:propertyId/images/:imageId
+//
+// Rules:
+// - society_admin only
+// - property must belong to logged-in admin society
+// - deletes image from Cloudinary first if public_id exists
+// - deletes DB record
+// - if deleted image was cover, next image becomes cover automatically
+// ==========================================================
+
+app.delete(
+  "/properties/:propertyId/images/:imageId",
+  authenticateToken,
+  authorizeRoles("society_admin"),
+  async (req, res) => {
+    const { propertyId, imageId } = req.params;
+
+    try {
+      const property = await validatePropertyOwnership(
+        propertyId,
+        req.user.society_id
+      );
+
+      if (!property) {
+        return res.status(404).json({
+          message: "Property not found or unauthorized",
+        });
+      }
+
+      const imageResult = await pool.query(
+        `SELECT *
+         FROM property_images
+         WHERE image_id = $1
+           AND property_id = $2`,
+        [imageId, propertyId]
+      );
+
+      if (imageResult.rows.length === 0) {
+        return res.status(404).json({
+          message: "Image not found",
+        });
+      }
+
+      const image = imageResult.rows[0];
+
+      const client = await pool.connect();
+
+      try {
+        await client.query("BEGIN");
+
+        if (image.public_id) {
+          await cloudinary.uploader.destroy(image.public_id);
+        }
+
+        await client.query(
+          `DELETE FROM property_images
+           WHERE image_id = $1
+             AND property_id = $2`,
+          [imageId, propertyId]
+        );
+
+        if (image.is_cover === true) {
+          await client.query(
+            `UPDATE property_images
+             SET is_cover = true
+             WHERE image_id = (
+               SELECT image_id
+               FROM property_images
+               WHERE property_id = $1
+               ORDER BY display_order ASC, image_id ASC
+               LIMIT 1
+             )`,
+            [propertyId]
+          );
+        }
+
+        await client.query("COMMIT");
+
+        res.json({
+          message: "Image deleted successfully",
+          deleted_image_id: Number(imageId),
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      console.error("Delete property image error:", err);
+
+      res.status(500).json({
+        message: "Failed to delete image",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// ==========================================================
+// 5) SET COVER IMAGE
+// ==========================================================
+// API:
+// PATCH /properties/:propertyId/images/:imageId/cover
+//
+// Rules:
+// - society_admin only
+// - property must belong to logged-in admin society
+// - only one cover image allowed
+// - respects uq_property_cover_image unique index
+// ==========================================================
+
+app.patch(
+  "/properties/:propertyId/images/:imageId/cover",
+  authenticateToken,
+  authorizeRoles("society_admin"),
+  async (req, res) => {
+    const { propertyId, imageId } = req.params;
+
+    const client = await pool.connect();
+
+    try {
+      const property = await validatePropertyOwnership(
+        propertyId,
+        req.user.society_id
+      );
+
+      if (!property) {
+        return res.status(404).json({
+          message: "Property not found or unauthorized",
+        });
+      }
+
+      const imageCheck = await pool.query(
+        `SELECT image_id
+         FROM property_images
+         WHERE image_id = $1
+           AND property_id = $2`,
+        [imageId, propertyId]
+      );
+
+      if (imageCheck.rows.length === 0) {
+        return res.status(404).json({
+          message: "Image not found",
+        });
+      }
+
+      await client.query("BEGIN");
+
+      await client.query(
+        `UPDATE property_images
+         SET is_cover = false
+         WHERE property_id = $1`,
+        [propertyId]
+      );
+
+      const result = await client.query(
+        `UPDATE property_images
+         SET is_cover = true
+         WHERE image_id = $1
+           AND property_id = $2
+         RETURNING *`,
+        [imageId, propertyId]
+      );
+
+      await client.query("COMMIT");
+
+      res.json({
+        message: "Cover image updated successfully",
+        image: result.rows[0],
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+
+      console.error("Set cover image error:", err);
+
+      res.status(500).json({
+        message: "Failed to set cover image",
+        error: err.message,
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ==========================================================
+// 6) REORDER PROPERTY IMAGES
+// ==========================================================
+// API:
+// PATCH /properties/:propertyId/images/reorder
+//
+// Body:
+// {
+//   "images": [
+//     { "image_id": 10, "display_order": 0 },
+//     { "image_id": 11, "display_order": 1 }
+//   ]
+// }
+//
+// Rules:
+// - society_admin only
+// - property must belong to logged-in admin society
+// - only images of that property can be reordered
+// ==========================================================
+
+app.patch(
+  "/properties/:propertyId/images/reorder",
+  authenticateToken,
+  authorizeRoles("society_admin"),
+  async (req, res) => {
+    const { propertyId } = req.params;
+    const { images } = req.body;
+
+    if (!Array.isArray(images) || images.length === 0) {
+      return res.status(400).json({
+        message: "images array is required",
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      const property = await validatePropertyOwnership(
+        propertyId,
+        req.user.society_id
+      );
+
+      if (!property) {
+        return res.status(404).json({
+          message: "Property not found or unauthorized",
+        });
+      }
+
+      await client.query("BEGIN");
+
+      for (const img of images) {
+        if (
+          img.image_id === undefined ||
+          img.display_order === undefined ||
+          Number.isNaN(Number(img.display_order))
+        ) {
+          await client.query("ROLLBACK");
+
+          return res.status(400).json({
+            message: "Each image must have image_id and display_order",
+          });
+        }
+
+        await client.query(
+          `UPDATE property_images
+           SET display_order = $1
+           WHERE image_id = $2
+             AND property_id = $3`,
+          [Number(img.display_order), Number(img.image_id), propertyId]
+        );
+      }
+
+      const result = await client.query(
+        `SELECT
+           image_id,
+           property_id,
+           image_url,
+           public_id,
+           display_order,
+           is_cover,
+           uploaded_by,
+           created_at
+         FROM property_images
+         WHERE property_id = $1
+         ORDER BY
+           is_cover DESC,
+           display_order ASC,
+           image_id ASC`,
+        [propertyId]
+      );
+
+      await client.query("COMMIT");
+
+      res.json({
+        message: "Image order updated successfully",
+        images: result.rows,
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+
+      console.error("Reorder property images error:", err);
+
+      res.status(500).json({
+        message: "Failed to reorder images",
+        error: err.message,
+      });
+    } finally {
+      client.release();
     }
   }
 );

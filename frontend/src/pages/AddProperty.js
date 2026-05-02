@@ -9,12 +9,19 @@
 // 3. Frontend does NOT send society_id or society_code manually.
 // 4. Backend uses req.user.society_id from JWT.
 // 5. SALE and RENT show different pricing fields.
+// 6. After property is saved successfully, user is redirected to
+//    Manage Property Images page:
+//    /properties/:id/images/manage
 // ------------------------------------------------------------
 
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 
 export default function AddProperty() {
+  // Used to redirect after successful property creation
+  const navigate = useNavigate();
+
   // JWT token for protected API calls
   const token = localStorage.getItem('token');
 
@@ -23,6 +30,9 @@ export default function AddProperty() {
 
   // Message shown after success/error
   const [message, setMessage] = useState('');
+
+  // Prevent duplicate submit while API call is in progress
+  const [saving, setSaving] = useState(false);
 
   // Main property form state
   const [formData, setFormData] = useState({
@@ -59,6 +69,7 @@ export default function AddProperty() {
   // Load mapped society when page opens
   useEffect(() => {
     fetchMySociety();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ------------------------------------------------------------
@@ -124,54 +135,75 @@ export default function AddProperty() {
   };
 
   // ------------------------------------------------------------
+  // Extract created property ID safely from backend response.
+  //
+  // This is defensive because different backend versions may return:
+  // 1. { prop_id: 1 }
+  // 2. { id: 1 }
+  // 3. { property_id: 1 }
+  // 4. { property: { prop_id: 1 } }
+  // 5. { property: { id: 1 } }
+  // 6. { property: { property_id: 1 } }
+  // 7. { data: { prop_id: 1 } }
+  // ------------------------------------------------------------
+  const getCreatedPropertyId = (responseData) => {
+    return (
+      responseData?.prop_id ||
+      responseData?.id ||
+      responseData?.property_id ||
+      responseData?.property?.prop_id ||
+      responseData?.property?.id ||
+      responseData?.property?.property_id ||
+      responseData?.data?.prop_id ||
+      responseData?.data?.id ||
+      responseData?.data?.property_id
+    );
+  };
+
+  // ------------------------------------------------------------
   // Submit property details
   // Backend will automatically attach society_id, society_code,
   // society_name using logged-in user's token.
+  //
+  // New frontend flow:
+  // Add Property -> Save -> Redirect to Manage Images
   // ------------------------------------------------------------
   const handleSubmit = async (e) => {
     e.preventDefault();
 
     try {
-      await api.post('/properties', formData, {
+      setSaving(true);
+      setMessage('');
+
+      const res = await api.post('/properties', formData, {
         headers: {
           Authorization: `Bearer ${token}`
         }
       });
 
-      setMessage('Property added successfully ✅');
+      const createdPropertyId = getCreatedPropertyId(res.data);
 
-      // Reset form after successful save
-      setFormData({
-        wing_flat_no: '',
-        floor_no: '',
-        c_type: '2BHK',
-        carpet_area_sqft: '',
-        f_type: 'Semi-Furnished',
-        furniture_details: '',
-        parking_type: 'Reserved',
-        parking_count: '1',
-        request_type: 'SALE',
+      // If backend returns created property ID, redirect to image manager
+      if (createdPropertyId) {
+        setMessage('Property added successfully ✅ Redirecting to image upload...');
 
-        expected_price: '',
-        negotiable: 'Yes',
-        bottom_price: '',
-        monthly_maintenance: '',
+        navigate(`/properties/${createdPropertyId}/images/manage`);
+        return;
+      }
 
-        expected_rent: '',
-        expected_deposit: '',
-        bottom_rent_price: '',
-        bottom_deposit_price: '',
+      // Fallback safety:
+      // If backend saved property but did not return ID, do not break the flow.
+      // User can still go to My Properties and manage/edit from there.
+      setMessage(
+        'Property added successfully ✅ But property ID was not returned, so image upload page could not open automatically.'
+      );
 
-        available_from: '',
-        property_description: '',
-        owner_name: '',
-        owner_contact: '',
-        admin_notes: ''
-      });
-
+      navigate('/my-properties');
     } catch (error) {
       console.error('Add property error:', error);
       setMessage(error.response?.data?.message || 'Failed to add property');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -493,8 +525,12 @@ export default function AddProperty() {
           )}
 
           <div style={{ marginTop: '20px' }}>
-            <button className="btn btn-primary" type="submit">
-              Add Property
+            <button
+              className="btn btn-primary"
+              type="submit"
+              disabled={saving}
+            >
+              {saving ? 'Saving Property...' : 'Add Property'}
             </button>
           </div>
         </form>

@@ -1,14 +1,18 @@
 // ------------------------------------------------------------
 // EditProperty.js
 // ------------------------------------------------------------
-// Society Admin page to edit existing property.
+// SocioDeal - Edit Property Page
 //
-// This form now matches AddProperty.js fields.
-// It supports:
-// - Basic property details
-// - Sale/Rent conditional pricing
-// - Image upload section
-// - Existing image preview
+// Purpose:
+// - Load existing property by ID
+// - Populate all new property fields correctly
+// - Update property using only new fields
+// - Keep image upload section working
+//
+// Important:
+// - Frontend uses NEW fields only
+// - Old compatibility fields like price, a_type, so_name, so_location
+//   are handled safely by backend only
 // ------------------------------------------------------------
 
 import { useEffect, useState } from 'react';
@@ -18,21 +22,16 @@ import api from '../services/api';
 export default function EditProperty() {
   const { id } = useParams();
   const navigate = useNavigate();
+
   const token = localStorage.getItem('token');
 
-  // Mapped society details
   const [society, setSociety] = useState(null);
-
-  // Existing uploaded images
   const [images, setImages] = useState([]);
-
-  // Selected image file
   const [selectedFile, setSelectedFile] = useState(null);
 
-  // Message
+  const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
 
-  // Same fields as AddProperty.js
   const [formData, setFormData] = useState({
     wing_flat_no: '',
     floor_no: '',
@@ -54,6 +53,7 @@ export default function EditProperty() {
     bottom_rent_price: '',
     bottom_deposit_price: '',
 
+    property_status: 'AVAILABLE',
     available_from: '',
     property_description: '',
     owner_name: '',
@@ -61,137 +61,229 @@ export default function EditProperty() {
     admin_notes: ''
   });
 
+  // ------------------------------------------------------------
+  // Common auth header for protected APIs
+  // ------------------------------------------------------------
+  const authConfig = {
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  };
+
+  // ------------------------------------------------------------
+  // Convert backend value safely to input value
+  // React input fields should not receive null/undefined
+  // ------------------------------------------------------------
+  const safeValue = (value) => {
+    if (value === null || value === undefined) return '';
+    return String(value);
+  };
+
+  // ------------------------------------------------------------
+  // Convert date from backend timestamp to yyyy-mm-dd for date input
+  // Example backend: 2026-04-30T18:30:00.000Z
+  // ------------------------------------------------------------
+  const formatDateForInput = (dateValue) => {
+    if (!dateValue) return '';
+    return String(dateValue).substring(0, 10);
+  };
+
+  // ------------------------------------------------------------
+  // Load property + images when page opens
+  // ------------------------------------------------------------
   useEffect(() => {
     fetchProperty();
     fetchImages();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // Fetch property details and populate full edit form
+  // ------------------------------------------------------------
+  // Fetch property details
+  // ------------------------------------------------------------
   const fetchProperty = async () => {
     try {
-      const res = await api.get(`/properties/${id}`);
+      setLoading(true);
+      setMessage('');
 
+      const res = await api.get(`/properties/${id}`, authConfig);
+      const property = res.data;
+
+      console.log('Loaded property for edit:', property);
+
+      // Society details are read-only on edit page
       setSociety({
-        society_code: res.data.society_code || res.data.society_cd || '',
-        society_name: res.data.society_name || res.data.so_name || '',
-        address: res.data.society_address || res.data.so_location || ''
+        society_code: property.society_code || property.society_cd || '',
+        society_name: property.society_name || property.so_name || '',
+        address: property.society_address || property.so_location || ''
       });
 
+      // Populate form with NEW property fields
       setFormData({
-        wing_flat_no: res.data.wing_flat_no || '',
-        floor_no: res.data.floor_no || '',
-        c_type: res.data.c_type || '2BHK',
-        carpet_area_sqft: res.data.carpet_area_sqft || '',
-        f_type: res.data.f_type || 'Semi-Furnished',
-        furniture_details: res.data.furniture_details || '',
-        parking_type: res.data.parking_type || 'Reserved',
-        parking_count: res.data.parking_count ?? '1',
-        request_type: res.data.request_type || res.data.a_type || 'SALE',
+        wing_flat_no: safeValue(property.wing_flat_no),
+        floor_no: safeValue(property.floor_no),
+        c_type: property.c_type || '2BHK',
+        carpet_area_sqft: safeValue(property.carpet_area_sqft),
+        f_type: property.f_type || 'Semi-Furnished',
+        furniture_details: safeValue(property.furniture_details),
+        parking_type: property.parking_type || 'Reserved',
+        parking_count: safeValue(property.parking_count || '1'),
+        request_type: property.request_type || property.a_type || 'SALE',
 
-        expected_price: res.data.expected_price || '',
-        negotiable: res.data.negotiable || (res.data.negotiate ? 'Yes' : 'No'),
-        bottom_price: res.data.bottom_price || '',
-        monthly_maintenance: res.data.monthly_maintenance || '',
+        expected_price: safeValue(property.expected_price),
+        negotiable:
+          property.negotiable ||
+          (property.negotiate === true ? 'Yes' : 'No'),
+        bottom_price: safeValue(property.bottom_price),
+        monthly_maintenance: safeValue(property.monthly_maintenance),
 
-        expected_rent: res.data.expected_rent || '',
-        expected_deposit: res.data.expected_deposit || '',
-        bottom_rent_price: res.data.bottom_rent_price || '',
-        bottom_deposit_price: res.data.bottom_deposit_price || '',
+        expected_rent: safeValue(property.expected_rent),
+        expected_deposit: safeValue(property.expected_deposit),
+        bottom_rent_price: safeValue(property.bottom_rent_price),
+        bottom_deposit_price: safeValue(property.bottom_deposit_price),
 
-        available_from: res.data.available_from
-          ? res.data.available_from.substring(0, 10)
-          : '',
-        property_description: res.data.property_description || '',
-        owner_name: res.data.owner_name || '',
-        owner_contact: res.data.owner_contact || '',
-        admin_notes: res.data.admin_notes || ''
+        property_status: property.property_status || 'AVAILABLE',
+        available_from: formatDateForInput(property.available_from),
+        property_description: safeValue(property.property_description),
+        owner_name: safeValue(property.owner_name),
+        owner_contact: safeValue(property.owner_contact),
+        admin_notes: safeValue(property.admin_notes)
       });
-
     } catch (error) {
       console.error('Fetch property error:', error);
-      setMessage('Failed to load property details');
+
+      setMessage(
+        error.response?.data?.message ||
+          error.response?.data?.error ||
+          'Failed to load property details'
+      );
+    } finally {
+      setLoading(false);
     }
   };
 
+  // ------------------------------------------------------------
   // Fetch existing property images
+  // If backend image API is not ready, do not break edit page
+  // ------------------------------------------------------------
   const fetchImages = async () => {
     try {
-      const res = await api.get(`/properties/${id}/images`);
-      setImages(res.data);
+      const res = await api.get(`/properties/${id}/images`, authConfig);
+      setImages(Array.isArray(res.data) ? res.data : []);
     } catch (error) {
-      console.error('Fetch images error:', error);
+      console.warn('Image API not available or failed:', error);
+      setImages([]);
     }
   };
 
+  // ------------------------------------------------------------
   // Handle form changes
+  // ------------------------------------------------------------
   const handleChange = (e) => {
     const { name, value } = e.target;
 
+    // When request type changes, clear opposite pricing fields
     if (name === 'request_type') {
-      setFormData({
-        ...formData,
+      setFormData((prev) => ({
+        ...prev,
         request_type: value,
-        expected_price: '',
+
+        expected_price: value === 'SALE' ? prev.expected_price : '',
         negotiable: 'Yes',
-        bottom_price: '',
-        expected_rent: '',
-        expected_deposit: '',
-        bottom_rent_price: '',
-        bottom_deposit_price: ''
-      });
+        bottom_price: value === 'SALE' ? prev.bottom_price : '',
+
+        expected_rent: value === 'RENT' ? prev.expected_rent : '',
+        expected_deposit: value === 'RENT' ? prev.expected_deposit : '',
+        bottom_rent_price: value === 'RENT' ? prev.bottom_rent_price : '',
+        bottom_deposit_price:
+          value === 'RENT' ? prev.bottom_deposit_price : ''
+      }));
       return;
     }
 
+    // If negotiable is No, clear bottom price
     if (name === 'negotiable' && value === 'No') {
-      setFormData({
-        ...formData,
+      setFormData((prev) => ({
+        ...prev,
         negotiable: value,
         bottom_price: ''
-      });
+      }));
       return;
     }
 
+    // If no parking, parking count must be 0
     if (name === 'parking_type' && value === 'No Parking') {
-      setFormData({
-        ...formData,
+      setFormData((prev) => ({
+        ...prev,
         parking_type: value,
         parking_count: '0'
-      });
+      }));
       return;
     }
 
-    setFormData({
-      ...formData,
+    setFormData((prev) => ({
+      ...prev,
       [name]: value
-    });
+    }));
   };
 
-  // Submit updated property details
+  // ------------------------------------------------------------
+  // Submit updated property
+  // ------------------------------------------------------------
   const handleSubmit = async (e) => {
     e.preventDefault();
 
     try {
-      await api.put(`/properties/${id}`, formData, {
-        headers: {
-          Authorization: `Bearer ${token}`
-        }
-      });
+      setMessage('');
+
+      const payload = {
+        ...formData,
+
+        // Keep SALE fields only for SALE
+        expected_price:
+          formData.request_type === 'SALE' ? formData.expected_price : '',
+        bottom_price:
+          formData.request_type === 'SALE' ? formData.bottom_price : '',
+
+        // Keep RENT fields only for RENT
+        expected_rent:
+          formData.request_type === 'RENT' ? formData.expected_rent : '',
+        expected_deposit:
+          formData.request_type === 'RENT' ? formData.expected_deposit : '',
+        bottom_rent_price:
+          formData.request_type === 'RENT'
+            ? formData.bottom_rent_price
+            : '',
+        bottom_deposit_price:
+          formData.request_type === 'RENT'
+            ? formData.bottom_deposit_price
+            : ''
+      };
+
+      await api.put(`/properties/${id}`, payload, authConfig);
 
       alert('Property updated successfully ✅');
       navigate('/my-properties');
-
     } catch (error) {
       console.error('Update property error:', error);
-      setMessage(error.response?.data?.message || 'Failed to update property');
+
+      setMessage(
+        error.response?.data?.message ||
+          error.response?.data?.error ||
+          'Failed to update property'
+      );
     }
   };
 
-  // Select image file
+  // ------------------------------------------------------------
+  // Image file selection
+  // ------------------------------------------------------------
   const handleFileChange = (e) => {
     setSelectedFile(e.target.files[0]);
   };
 
-  // Upload image
+  // ------------------------------------------------------------
+  // Upload property image
+  // ------------------------------------------------------------
   const handleUploadImage = async () => {
     if (!selectedFile) {
       alert('Please choose an image file first');
@@ -212,36 +304,60 @@ export default function EditProperty() {
       alert('Image uploaded successfully ✅');
       setSelectedFile(null);
       fetchImages();
-
     } catch (error) {
       console.error('Upload image error:', error);
+
       alert(
         error.response?.data?.message ||
-        error.response?.data?.error ||
-        'Image upload failed'
+          error.response?.data?.error ||
+          'Image upload failed'
       );
     }
   };
+
+  // ------------------------------------------------------------
+  // Loading state
+  // ------------------------------------------------------------
+  if (loading) {
+    return (
+      <div className="page-container">
+        <div className="card" style={{ maxWidth: '850px', margin: '0 auto' }}>
+          <h2>✏️ Edit Property</h2>
+          <p>Loading property details...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="page-container">
       <div className="card" style={{ maxWidth: '850px', margin: '0 auto' }}>
         <h2>✏️ Edit Property</h2>
 
-        {/* Read-only society details */}
+        {/* Read-only mapped society section */}
         <div className="card" style={{ backgroundColor: '#f9fafb' }}>
           <h3>Mapped Society</h3>
 
           {society ? (
             <>
-              <p><b>Society Code:</b> {society.society_code}</p>
-              <p><b>Society Name:</b> {society.society_name}</p>
-              <p><b>Address:</b> {society.address || 'N/A'}</p>
+              <p>
+                <b>Society Code:</b> {society.society_code || 'N/A'}
+              </p>
+              <p>
+                <b>Society Name:</b> {society.society_name || 'N/A'}
+              </p>
+              <p>
+                <b>Address:</b> {society.address || 'N/A'}
+              </p>
             </>
           ) : (
-            <p>Loading mapped society...</p>
+            <p>Society details not available</p>
           )}
         </div>
+
+        {message && (
+          <p style={{ color: 'red', marginTop: '15px' }}>{message}</p>
+        )}
 
         <form onSubmit={handleSubmit}>
           <h3>Property Details</h3>
@@ -281,6 +397,7 @@ export default function EditProperty() {
             <option>2.5BHK</option>
             <option>3BHK</option>
             <option>3.5BHK</option>
+            <option>4BHK</option>
           </select>
 
           <label>Carpet Area (Sq.Ft)</label>
@@ -324,6 +441,8 @@ export default function EditProperty() {
           >
             <option>Reserved</option>
             <option>Open Reserved</option>
+            <option>Covered</option>
+            <option>Open</option>
             <option>No Parking</option>
           </select>
 
@@ -339,6 +458,18 @@ export default function EditProperty() {
             <option>1</option>
             <option>2</option>
             <option>3</option>
+          </select>
+
+          <label>Property Status</label>
+          <select
+            className="select"
+            name="property_status"
+            value={formData.property_status}
+            onChange={handleChange}
+          >
+            <option>AVAILABLE</option>
+            <option>ON_HOLD</option>
+            <option>CLOSED</option>
           </select>
 
           <label>Available From</label>
@@ -510,8 +641,6 @@ export default function EditProperty() {
           </div>
         </form>
 
-        {message && <p style={{ marginTop: '15px' }}>{message}</p>}
-
         <hr style={{ margin: '24px 0' }} />
 
         <h3>🖼 Upload Property Image</h3>
@@ -523,7 +652,12 @@ export default function EditProperty() {
           className="input"
         />
 
-        <button className="btn btn-success" onClick={handleUploadImage}>
+        <button
+          type="button"
+          className="btn btn-success"
+          onClick={handleUploadImage}
+          style={{ marginTop: '10px' }}
+        >
           Upload Image
         </button>
 
@@ -535,7 +669,7 @@ export default function EditProperty() {
           ) : (
             <div className="property-grid">
               {images.map((img) => (
-                <div key={img.image_id} className="card">
+                <div key={img.image_id || img.image_url} className="card">
                   <img
                     src={img.image_url}
                     alt="Property"

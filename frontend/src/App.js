@@ -17,6 +17,7 @@ import SocietyOnboarding from './pages/SocietyOnboarding';
 import Societies from './pages/Societies';
 import EditSociety from './pages/EditSociety';
 import SocietyDetails from './pages/SocietyDetails';
+import ManagePropertyImages from "./pages/ManagePropertyImages";
 // Import route protection component
 import ProtectedRoute from './components/ProtectedRoute';
 
@@ -74,6 +75,10 @@ function App() {
             </ProtectedRoute>
           }
         />
+        <Route
+  path="/properties/:id/images/manage"
+  element={<ManagePropertyImages />}
+/>
 
         {/* View properties created by logged-in admin */}
         <Route
