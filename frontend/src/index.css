@@ -1,0 +1,97 @@
+/* Reset some default browser spacing */
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  background-color: #f5f7fb;
+  color: #222;
+}
+
+/* Remove underline from links by default */
+a {
+  text-decoration: none;
+  color: #1d4ed8;
+}
+
+/* Main container width */
+.page-container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+/* Card style used across pages */
+.card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+
+/* Button styles */
+.btn {
+  padding: 10px 14px;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.btn-primary {
+  background-color: #2563eb;
+  color: white;
+}
+
+.btn-danger {
+  background-color: #dc2626;
+  color: white;
+}
+
+.btn-secondary {
+  background-color: #6b7280;
+  color: white;
+}
+
+.btn-success {
+  background-color: #16a34a;
+  color: white;
+}
+
+/* Input and select styles */
+.input,
+.select,
+.textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  margin-top: 6px;
+  margin-bottom: 14px;
+  box-sizing: border-box;
+  font-size: 14px;
+}
+
+/* Headings */
+h1, h2, h3 {
+  margin-top: 0;
+}
+
+/* Grid layout for property cards */
+.property-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+/* Small muted text */
+.muted {
+  color: #6b7280;
+}
+.login-wrapper {
+  min-height: calc(100vh - 80px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 60px;
+}
