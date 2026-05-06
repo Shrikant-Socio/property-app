@@ -178,9 +178,27 @@ app.post("/register", async (req, res) => {
   } catch (err) {
     console.error("Register error:", err);
 
-    if (err.code === "23505") {
-      return res.status(400).json({ message: "Email already exists" });
-    }
+    // PostgreSQL duplicate key error
+// This handles duplicate email / phone with proper user-friendly message
+if (err.code === "23505") {
+  const detail = err.detail || "";
+
+  if (detail.includes("email")) {
+    return res.status(400).json({
+      message: "Email is already registered",
+    });
+  }
+
+  if (detail.includes("phone")) {
+    return res.status(400).json({
+      message: "Mobile number is already registered with another user",
+    });
+  }
+
+  return res.status(400).json({
+    message: "User already exists with provided details",
+  });
+}
 
     res.status(500).json({
       message: "Failed to register user",
@@ -2039,58 +2057,161 @@ app.patch(
 );
 
 // ==========================================================
-// INQUIRY APIs
+// INQUIRY APIs - ENHANCED FLOW
 // ==========================================================
 
-app.post("/inquiry", authenticateToken, async (req, res) => {
-  try {
-    const { property_id, message } = req.body;
+// Allowed inquiry types (as per DB)
+const ALLOWED_INQUIRY_TYPES = [
+  "interested",
+  "schedule_visit",
+  "contact_me",
+  "price_negotiation",
+  "more_details",
+];
 
-    if (!property_id) {
-      return res.status(400).json({
-        message: "property_id is required",
+// Allowed statuses
+const ALLOWED_INQUIRY_STATUSES = [
+  "requested",
+  "contacted",
+  "visit_scheduled",
+  "visited",
+  "negotiation",
+  "deal_closed",
+  "cancelled",
+  "rejected",
+];
+
+// Normalize inquiry type
+function normalizeInquiryType(value) {
+  if (!value) return "interested";
+  const v = String(value).toLowerCase().trim();
+  return ALLOWED_INQUIRY_TYPES.includes(v) ? v : null;
+}
+
+// Normalize mobile
+function normalizeMobile(value) {
+  if (!value) return "";
+  return String(value).replace(/\D/g, "");
+}
+
+// Validate Indian mobile
+function isValidMobile(value) {
+  return /^[6-9]\d{9}$/.test(value);
+}
+
+// ==========================================================
+// CREATE INQUIRY (BUYER / TENANT)
+// ==========================================================
+app.post(
+  "/inquiry",
+  authenticateToken,
+  authorizeRoles("buyer", "tenant"),
+  async (req, res) => {
+    try {
+      const { property_id, name, phone, message, inquiry_type } = req.body;
+
+      if (!property_id) {
+        return res.status(400).json({ message: "property_id is required" });
+      }
+
+      const finalType = normalizeInquiryType(inquiry_type);
+
+      if (!finalType) {
+        return res.status(400).json({
+          message: "Invalid inquiry_type",
+        });
+      }
+
+      // Get user info
+      const userResult = await pool.query(
+        `SELECT full_name, phone FROM users WHERE user_id = $1`,
+        [req.user.user_id]
+      );
+
+      const user = userResult.rows[0];
+
+      const finalName = String(user.full_name || "").trim();
+      const finalPhone = normalizeMobile(user.phone);
+
+      if (!finalName) {
+        return res.status(400).json({
+          message: "Name is required",
+        });
+      }
+
+      if (!isValidMobile(finalPhone)) {
+        return res.status(400).json({
+          message: "Valid mobile number required",
+        });
+      }
+
+      const propertyResult = await pool.query(
+        `SELECT prop_id, society_id
+         FROM properties
+         WHERE prop_id = $1`,
+        [property_id]
+      );
+
+      if (propertyResult.rows.length === 0) {
+        return res.status(404).json({ message: "Property not found" });
+      }
+
+      const property = propertyResult.rows[0];
+
+      const result = await pool.query(
+        `INSERT INTO inquiries
+         (
+           property_id,
+           user_id,
+           name,
+           phone,
+           message,
+           society_id,
+           inquiry_type,
+           status,
+           mobile_verified,
+           last_status_updated_at
+         )
+         VALUES
+         ($1,$2,$3,$4,$5,$6,$7,'requested',false,CURRENT_TIMESTAMP)
+         RETURNING *`,
+        [
+          property_id,
+          req.user.user_id,
+          finalName,
+          finalPhone,
+          message || null,
+          property.society_id,
+          finalType,
+        ]
+      );
+
+      res.status(201).json({
+        message: "Inquiry submitted successfully",
+        inquiry: result.rows[0],
       });
-    }
-
-    const propertyResult = await pool.query(
-      `SELECT prop_id, society_id
-       FROM properties
-       WHERE prop_id = $1`,
-      [property_id]
-    );
-
-    if (propertyResult.rows.length === 0) {
-      return res.status(404).json({ message: "Property not found" });
-    }
-
-    const property = propertyResult.rows[0];
-
-    const result = await pool.query(
-      `INSERT INTO inquiries
-       (property_id, user_id, name, phone, message, society_id)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING *`,
-      [
-        property_id,
-        req.user.user_id,
-        req.user.email,
-        "",
-        message || "",
-        property.society_id,
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("Error creating inquiry:", err);
-
-    res.status(500).json({
-      message: "Failed to create inquiry",
-      error: err.message,
+    } catch (err) {
+  // Handle duplicate inquiry gracefully
+  // Constraint: uq_inquiry_user_property = one buyer can inquire once per property
+  if (err.code === "23505" && err.constraint === "uq_inquiry_user_property") {
+    return res.status(409).json({
+      message: "You have already sent an inquiry for this property",
     });
   }
-});
 
+  console.error("Error creating inquiry:", err);
+
+  res.status(500).json({
+    message: "Failed to create inquiry",
+    error: err.message,
+  });
+}
+  }
+);
+
+// ==========================================================
+// SOCIETY ADMIN - GET INQUIRIES
+// ==========================================================
 app.get(
   "/inquiries",
   authenticateToken,
@@ -2098,32 +2219,47 @@ app.get(
   async (req, res) => {
     try {
       const result = await pool.query(
-        `SELECT 
-           i.*,
-           p.wing_flat_no,
+        `SELECT
+           i.inquiry_id,
+           i.property_id,
+           i.name,
+           i.phone,
+           i.inquiry_type,
+           i.message,
+           i.status,
+           i.created_at,
+           i.visit_date,
+           i.visit_time,
+           i.notes,
+           i.last_status_updated_at,
+
            p.c_type,
            p.request_type,
            p.expected_price,
-           p.expected_rent
+           p.expected_rent,
+
+           s.society_name,
+           s.address AS society_address
+
          FROM inquiries i
          JOIN properties p ON i.property_id = p.prop_id
-         WHERE p.society_id = $1
+         LEFT JOIN societies s ON p.society_id = s.society_id
+         WHERE i.society_id = $1
          ORDER BY i.inquiry_id DESC`,
         [req.user.society_id]
       );
 
       res.json(result.rows);
     } catch (err) {
-      console.error("Error fetching inquiries:", err);
-
-      res.status(500).json({
-        message: "Failed to fetch inquiries",
-        error: err.message,
-      });
+      console.error(err);
+      res.status(500).json({ message: "Failed to fetch inquiries" });
     }
   }
 );
 
+// ==========================================================
+// UPDATE INQUIRY STATUS
+// ==========================================================
 app.patch(
   "/inquiry/:id",
   authenticateToken,
@@ -2133,37 +2269,126 @@ app.patch(
       const { id } = req.params;
       const { status, visit_date, visit_time, notes } = req.body;
 
+      if (status && !ALLOWED_INQUIRY_STATUSES.includes(status)) {
+        return res.status(400).json({ message: "Invalid status" });
+      }
+
       const result = await pool.query(
         `UPDATE inquiries
-         SET 
+         SET
            status = COALESCE($1, status),
            visit_date = COALESCE($2, visit_date),
            visit_time = COALESCE($3, visit_time),
-           notes = COALESCE($4, notes)
-         WHERE inquiry_id = $5
-           AND society_id = $6
+           notes = COALESCE($4, notes),
+           last_status_updated_at = CURRENT_TIMESTAMP,
+           status_updated_by = $5
+         WHERE inquiry_id = $6
+           AND society_id = $7
          RETURNING *`,
-        [status, visit_date, visit_time, notes, id, req.user.society_id]
+        [
+          status,
+          visit_date,
+          visit_time,
+          notes,
+          req.user.user_id,
+          id,
+          req.user.society_id,
+        ]
       );
 
       if (result.rows.length === 0) {
         return res.status(404).json({
-          message: "Inquiry not found or unauthorized",
+          message: "Inquiry not found",
         });
       }
 
       res.json(result.rows[0]);
     } catch (err) {
-      console.error("Error updating inquiry:", err);
+      console.error(err);
+      res.status(500).json({ message: "Update failed" });
+    }
+  }
+);
+// ==========================================================
+// BUYER / TENANT - MY INQUIRIES API
+// ==========================================================
+// Purpose:
+// - Buyer/Tenant can view only their own inquiries
+// - Society admin / platform admin cannot access this API
+// - Existing GET /inquiries for society_admin remains unchanged
+//
+// API:
+// GET /my-inquiries
+//
+// Auth:
+// Authorization: Bearer <buyer_or_tenant_token>
+// ==========================================================
+
+app.get(
+  "/my-inquiries",
+  authenticateToken,
+  authorizeRoles("buyer", "tenant"),
+  async (req, res) => {
+    try {
+      // ------------------------------------------------------
+      // req.user.user_id comes from JWT token after login.
+      // This ensures buyer/tenant can fetch only their own data.
+      // ------------------------------------------------------
+      const buyerUserId = req.user.user_id;
+
+      const result = await pool.query(
+        `SELECT
+           i.inquiry_id,
+           i.property_id,
+           i.message,
+           i.status,
+           i.created_at,
+           i.visit_date,
+           i.visit_time,
+
+           -- Buyer-visible society admin note.
+           -- Keep this only if your product decision allows buyers
+           -- to see society-admin visit/update notes.
+           i.notes,
+
+           -- Public property details
+           p.c_type,
+           p.request_type,
+           p.expected_price,
+           p.expected_rent,
+           p.expected_deposit,
+           p.property_status,
+           p.available_from,
+
+           -- Public society details
+           COALESCE(s.society_name, p.so_name) AS society_name,
+           COALESCE(s.address, p.so_location) AS society_address
+
+         FROM inquiries i
+
+         LEFT JOIN properties p
+           ON i.property_id = p.prop_id
+
+         LEFT JOIN societies s
+           ON p.society_id = s.society_id
+
+         WHERE i.user_id = $1
+
+         ORDER BY i.inquiry_id DESC`,
+        [buyerUserId]
+      );
+
+      res.json(result.rows);
+    } catch (err) {
+      console.error("Error fetching buyer/tenant inquiries:", err);
 
       res.status(500).json({
-        message: "Failed to update inquiry",
+        message: "Failed to fetch my inquiries",
         error: err.message,
       });
     }
   }
 );
-
 // ==========================================================
 // HEALTH CHECK
 // ==========================================================

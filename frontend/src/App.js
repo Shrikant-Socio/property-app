@@ -1,10 +1,10 @@
 // Import React Router components for navigation
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
-// Import shared UI component (top navigation bar)
+// Import shared UI component
 import Navbar from './components/Navbar';
 
-// Import all pages/screens of your application
+// Import pages
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Properties from './pages/Properties';
@@ -17,39 +17,38 @@ import SocietyOnboarding from './pages/SocietyOnboarding';
 import Societies from './pages/Societies';
 import EditSociety from './pages/EditSociety';
 import SocietyDetails from './pages/SocietyDetails';
-import ManagePropertyImages from "./pages/ManagePropertyImages";
+import ManagePropertyImages from './pages/ManagePropertyImages';
+import MyInquiries from './pages/MyInquiries';
+
 // Import route protection component
 import ProtectedRoute from './components/ProtectedRoute';
 
 function App() {
   return (
-    // BrowserRouter enables routing in the app
     <BrowserRouter>
-
-      {/* Navbar will be visible on all pages */}
       <Navbar />
 
-      {/* Define all application routes here */}
       <Routes>
-
-        {/* Default route → Property listing */}
+        {/* Public buyer/guest routes */}
         <Route path="/" element={<Properties />} />
-
-        {/* Explicit properties route (same as homepage) */}
         <Route path="/properties" element={<Properties />} />
-
-        {/* Login page */}
-        <Route path="/login" element={<Login />} />
-
-        {/* Register page (optional if implemented) */}
-        <Route path="/register" element={<Register />} />
-
-        {/* Property details page (dynamic ID) */}
         <Route path="/properties/:id" element={<PropertyDetails />} />
 
-        {/* 🔒 ADMIN PROTECTED ROUTES */}
+        {/* Auth routes */}
+        <Route path="/login" element={<Login />} />
+        <Route path="/register" element={<Register />} />
 
-        {/* Inquiries dashboard (only society_admin allowed) */}
+        {/* Buyer route */}
+        <Route
+          path="/my-inquiries"
+          element={
+            <ProtectedRoute role="buyer">
+              <MyInquiries />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Society admin routes */}
         <Route
           path="/inquiries"
           element={
@@ -58,15 +57,7 @@ function App() {
             </ProtectedRoute>
           }
         />
-<Route
-  path="/societies/:id"
-  element={
-    <ProtectedRoute role="platform_admin">
-      <SocietyDetails />
-    </ProtectedRoute>
-  }
-/>
-        {/* Add new property (admin only) */}
+
         <Route
           path="/add-property"
           element={
@@ -75,12 +66,7 @@ function App() {
             </ProtectedRoute>
           }
         />
-        <Route
-  path="/properties/:id/images/manage"
-  element={<ManagePropertyImages />}
-/>
 
-        {/* View properties created by logged-in admin */}
         <Route
           path="/my-properties"
           element={
@@ -90,7 +76,6 @@ function App() {
           }
         />
 
-        {/* Edit property (admin only) */}
         <Route
           path="/edit-property/:id"
           element={
@@ -99,41 +84,52 @@ function App() {
             </ProtectedRoute>
           }
         />
+
         <Route
-  path="/society-onboarding"
-  element={
-    <ProtectedRoute role="platform_admin">
-      <SocietyOnboarding />
-    </ProtectedRoute>
-  }
-/>
-<Route
-  path="/societies"
-  element={
-    <ProtectedRoute role="platform_admin">
-      <Societies />
-    </ProtectedRoute>
-  }
-/>
+          path="/properties/:id/images/manage"
+          element={
+            <ProtectedRoute role="society_admin">
+              <ManagePropertyImages />
+            </ProtectedRoute>
+          }
+        />
 
-<Route
-  path="/society-onboarding"
-  element={
-    <ProtectedRoute role="platform_admin">
-      <SocietyOnboarding />
-    </ProtectedRoute>
-  }
-/>
+        {/* Platform admin routes */}
+        <Route
+          path="/societies"
+          element={
+            <ProtectedRoute role="platform_admin">
+              <Societies />
+            </ProtectedRoute>
+          }
+        />
 
-<Route
-  path="/edit-society/:id"
-  element={
-    <ProtectedRoute role="platform_admin">
-      <EditSociety />
-    </ProtectedRoute>
-  }
-/>
+        <Route
+          path="/societies/:id"
+          element={
+            <ProtectedRoute role="platform_admin">
+              <SocietyDetails />
+            </ProtectedRoute>
+          }
+        />
 
+        <Route
+          path="/society-onboarding"
+          element={
+            <ProtectedRoute role="platform_admin">
+              <SocietyOnboarding />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/edit-society/:id"
+          element={
+            <ProtectedRoute role="platform_admin">
+              <EditSociety />
+            </ProtectedRoute>
+          }
+        />
       </Routes>
     </BrowserRouter>
   );

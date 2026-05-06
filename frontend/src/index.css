@@ -1,97 +1,619 @@
-/* Reset some default browser spacing */
+/* ============================================================
+   SocioDeal Global CSS
+   ------------------------------------------------------------
+   Purpose:
+   - Common styling for the full React frontend
+   - Mobile-first layout
+   - Professional buyer-facing property card UI
+   - Improved typography and spacing
+   - Existing class names preserved to avoid breaking pages
+============================================================ */
+
+/* ------------------------------------------------------------
+   1. Global Reset + Typography
+------------------------------------------------------------ */
+
+* {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter",
+    Arial, Helvetica, sans-serif;
   background-color: #f5f7fb;
-  color: #222;
+  color: #111827;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Remove underline from links by default */
 a {
   text-decoration: none;
-  color: #1d4ed8;
+  color: #2563eb;
 }
 
-/* Main container width */
+h1,
+h2,
+h3,
+h4 {
+  margin-top: 0;
+  color: #111827;
+  letter-spacing: -0.3px;
+}
+
+p {
+  line-height: 1.6;
+}
+
+button {
+  font-family: inherit;
+}
+
+/* ------------------------------------------------------------
+   2. Common Layout
+------------------------------------------------------------ */
+
 .page-container {
   max-width: 1100px;
   margin: 0 auto;
   padding: 20px;
 }
 
-/* Card style used across pages */
-.card {
-  background: #fff;
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+.muted {
+  color: #6b7280;
 }
 
-/* Button styles */
+/* ------------------------------------------------------------
+   3. Common Card
+------------------------------------------------------------ */
+
+.card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 18px;
+  margin-bottom: 16px;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+}
+
+.card h2 {
+  font-size: 21px;
+  font-weight: 750;
+  margin-bottom: 8px;
+}
+
+.card h3 {
+  font-size: 17px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.card p {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ------------------------------------------------------------
+   4. Buttons
+------------------------------------------------------------ */
+
 .btn {
   padding: 10px 14px;
   border: none;
-  border-radius: 8px;
+  border-radius: 10px;
   cursor: pointer;
   font-size: 14px;
+  font-weight: 700;
+  transition: all 0.2s ease;
 }
 
 .btn-primary {
   background-color: #2563eb;
-  color: white;
+  color: #ffffff;
+}
+
+.btn-primary:hover {
+  background-color: #1d4ed8;
 }
 
 .btn-danger {
   background-color: #dc2626;
-  color: white;
+  color: #ffffff;
 }
 
 .btn-secondary {
   background-color: #6b7280;
-  color: white;
+  color: #ffffff;
 }
 
 .btn-success {
   background-color: #16a34a;
-  color: white;
+  color: #ffffff;
 }
 
-/* Input and select styles */
+.full-btn {
+  width: 100%;
+  margin-top: 10px;
+  font-size: 15px;
+  font-weight: 750;
+  border-radius: 12px;
+}
+
+/* ------------------------------------------------------------
+   5. Inputs / Selects / Textarea
+------------------------------------------------------------ */
+
 .input,
 .select,
 .textarea {
   width: 100%;
-  padding: 10px 12px;
+  padding: 11px 12px;
   border: 1px solid #d1d5db;
-  border-radius: 8px;
+  border-radius: 10px;
   margin-top: 6px;
   margin-bottom: 14px;
   box-sizing: border-box;
   font-size: 14px;
+  font-family: inherit;
+  background: #ffffff;
 }
 
-/* Headings */
-h1, h2, h3 {
-  margin-top: 0;
+.input:focus,
+.select:focus,
+.textarea:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
 }
 
-/* Grid layout for property cards */
-.property-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 16px;
+.textarea {
+  line-height: 1.5;
+  resize: vertical;
 }
 
-/* Small muted text */
-.muted {
-  color: #6b7280;
-}
+/* ------------------------------------------------------------
+   6. Login Page
+------------------------------------------------------------ */
+
 .login-wrapper {
   min-height: calc(100vh - 80px);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: 60px;
+}
+
+/* ------------------------------------------------------------
+   7. Property Grid Base
+------------------------------------------------------------ */
+
+.property-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 18px;
+}
+
+/* ------------------------------------------------------------
+   8. Buyer Property Listing Page
+------------------------------------------------------------ */
+
+.property-listing-page {
+  padding-top: 18px;
+  background: #f8fafc;
+  min-height: 100vh;
+}
+
+.property-page-header {
+  margin-bottom: 14px;
+}
+
+.property-page-header h2 {
+  font-size: 28px;
+  font-weight: 850;
+  margin-bottom: 6px;
+}
+
+.property-page-header p {
+  font-size: 15px;
+  color: #64748b;
+  margin: 0;
+}
+
+/* ------------------------------------------------------------
+   9. Property Filter Tabs
+------------------------------------------------------------ */
+
+.property-filter-tabs {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 4px 0 18px;
+  margin-bottom: 10px;
+  scrollbar-width: none;
+}
+
+.property-filter-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.property-filter-tab {
+  flex: 0 0 auto;
+  min-width: 88px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 750;
+  cursor: pointer;
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.04);
+  transition: all 0.2s ease;
+}
+
+.property-filter-tab.active {
+  background: #111827;
+  color: #ffffff;
+  border-color: #111827;
+}
+
+.property-filter-tab:hover {
+  transform: translateY(-1px);
+}
+
+/* ------------------------------------------------------------
+   10. Premium Buyer Property Cards
+------------------------------------------------------------ */
+
+.buyer-property-grid {
+  grid-template-columns: 1fr;
+  gap: 20px;
+}
+
+.buyer-property-card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.08);
+  transition: all 0.25s ease;
+}
+
+.buyer-property-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.14);
+}
+
+.buyer-property-image-wrap {
+  position: relative;
+  height: 220px;
+  background: #e5e7eb;
+  overflow: hidden;
+}
+
+.buyer-property-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Fallback when no image exists */
+.buyer-property-placeholder {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #64748b;
+  font-weight: 750;
+  background: linear-gradient(135deg, #f8fafc, #e2e8f0);
+}
+
+.buyer-property-placeholder-icon {
+  font-size: 38px;
+}
+
+/* SALE / RENT badge on image */
+.property-type-badge {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.2);
+}
+
+.property-type-badge.sale {
+  background: #2563eb;
+}
+
+.property-type-badge.rent {
+  background: #16a34a;
+}
+
+.buyer-property-content {
+  padding: 16px;
+}
+
+/* Price should be strongest text on card */
+.buyer-property-price {
+  font-size: 22px;
+  font-weight: 900;
+  color: #0f172a;
+  margin-bottom: 6px;
+  letter-spacing: -0.4px;
+}
+
+.buyer-property-title {
+  font-size: 16px;
+  font-weight: 750;
+  margin: 0 0 6px;
+  color: #111827;
+  line-height: 1.35;
+}
+
+.buyer-property-society {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #1f2937;
+  line-height: 1.4;
+}
+
+.buyer-property-location {
+  margin: 0 0 12px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.buyer-property-highlights {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.buyer-property-highlights span {
+  background: #f1f5f9;
+  color: #334155;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.buyer-property-small-text {
+  margin: 0 0 12px;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.buyer-property-link {
+  display: block;
+}
+
+.buyer-view-details-btn {
+  width: 100%;
+  padding: 12px 14px;
+  font-size: 15px;
+  font-weight: 800;
+  border-radius: 13px;
+  box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+}
+
+.buyer-view-details-btn:hover {
+  transform: translateY(-1px);
+}
+
+/* ------------------------------------------------------------
+   11. Property Details Page
+------------------------------------------------------------ */
+
+.property-details-page {
+  max-width: 1100px;
+}
+
+.details-image-section {
+  margin-top: 14px;
+}
+
+.details-cover-image {
+  position: relative;
+  width: 100%;
+  max-height: 460px;
+  border-radius: 18px;
+  overflow: hidden;
+  background: #e5e7eb;
+  cursor: pointer;
+  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.1);
+}
+
+.details-cover-image img {
+  width: 100%;
+  height: 360px;
+  object-fit: cover;
+  display: block;
+}
+
+.details-placeholder {
+  height: 280px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  font-weight: 750;
+}
+
+.details-badge {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  background: #111827;
+  color: #ffffff;
+  padding: 7px 13px;
+  border-radius: 999px;
+  font-weight: 850;
+  font-size: 13px;
+  z-index: 2;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.22);
+}
+
+.details-gallery {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  margin-top: 12px;
+  padding-bottom: 4px;
+}
+
+.details-gallery img {
+  width: 110px;
+  height: 78px;
+  object-fit: cover;
+  border-radius: 12px;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: all 0.2s ease;
+}
+
+.details-gallery img:hover {
+  border-color: #2563eb;
+  transform: translateY(-1px);
+}
+
+.details-price {
+  font-size: 26px;
+  font-weight: 900;
+  color: #0f172a;
+  margin: 8px 0;
+  letter-spacing: -0.4px;
+}
+
+.details-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.details-grid div {
+  background: #f8fafc;
+  border: 1px solid #eef2f7;
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.details-grid b {
+  font-size: 13px;
+  color: #64748b;
+  font-weight: 700;
+}
+
+.details-grid p {
+  font-size: 15px;
+  font-weight: 750;
+  margin: 4px 0 0;
+  color: #111827;
+}
+
+/* ------------------------------------------------------------
+   12. Image Enlarge Modal
+------------------------------------------------------------ */
+
+.image-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.82);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+.image-modal-content {
+  position: relative;
+  max-width: 95vw;
+  max-height: 90vh;
+}
+
+.image-modal-content img {
+  max-width: 95vw;
+  max-height: 88vh;
+  object-fit: contain;
+  border-radius: 12px;
+}
+
+.image-modal-close {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  background: #ffffff;
+  border: none;
+  border-radius: 999px;
+  width: 36px;
+  height: 36px;
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 850;
+}
+
+/* ------------------------------------------------------------
+   13. Responsive Design
+------------------------------------------------------------ */
+
+/* Tablet and desktop */
+@media (min-width: 720px) {
+  .property-grid {
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  }
+
+  .buyer-property-grid {
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  }
+
+  .buyer-property-image-wrap {
+    height: 210px;
+  }
+}
+
+/* Larger desktop: fixed 3-column listing */
+@media (min-width: 1100px) {
+  .buyer-property-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+/* Mobile */
+@media (max-width: 600px) {
+  .page-container {
+    padding: 14px;
+  }
+
+  .property-page-header h2 {
+    font-size: 24px;
+  }
+
+  .buyer-property-image-wrap {
+    height: 210px;
+  }
+
+  .buyer-property-price {
+    font-size: 21px;
+  }
+
+  .details-cover-image img {
+    height: 260px;
+  }
+
+  .details-grid {
+    grid-template-columns: 1fr;
+  }
 }

@@ -7,26 +7,18 @@
 // - Show navigation links based on logged-in user role.
 // - Keep buyer/guest, society_admin, and platform_admin flows separate.
 //
-// Expected visibility:
-//
-// Guest / Buyer:
+// Buyer / Guest:
 // - Properties
-// - Login / Logout
+// - My Inquiries only for logged-in buyer/tenant
 //
 // Society Admin:
 // - My Properties
 // - Add Property
 // - Inquiries
-// - Logout
 //
 // Platform Admin:
 // - Societies
 // - Onboard Society
-// - Logout
-//
-// Important rule:
-// - society_admin should NOT see public "Properties" tab.
-// - platform_admin should NOT see public "Properties" tab.
 // ------------------------------------------------------------
 
 import { Link, useNavigate } from 'react-router-dom';
@@ -34,9 +26,6 @@ import { Link, useNavigate } from 'react-router-dom';
 export default function Navbar() {
   const navigate = useNavigate();
 
-  // ------------------------------------------------------------
-  // Read login session from localStorage.
-  // ------------------------------------------------------------
   const token = localStorage.getItem('token');
 
   let user = null;
@@ -48,42 +37,31 @@ export default function Navbar() {
     user = null;
   }
 
-  // ------------------------------------------------------------
-  // Normalize role to avoid issues like:
-  // "society_admin ", " Society_Admin", "SOCIETY_ADMIN"
-  // ------------------------------------------------------------
   const role = user?.role ? user.role.trim().toLowerCase() : '';
 
   const isLoggedIn = Boolean(token && user);
   const isSocietyAdmin = role === 'society_admin';
   const isPlatformAdmin = role === 'platform_admin';
   const isBuyer = role === 'buyer';
+  const isTenant = role === 'tenant';
 
-  // Guest means no valid logged-in user
   const isGuest = !isLoggedIn;
 
-  // Public properties should be visible only to guest or buyer
-  const canViewPublicProperties = isGuest || isBuyer;
+  // Public marketplace should be visible only to guest / buyer / tenant
+  const canViewPublicProperties = isGuest || isBuyer || isTenant;
 
-  // ------------------------------------------------------------
-  // Logout user and clear local session
-  // ------------------------------------------------------------
+  // Buyer inquiry tracking should be visible only to buyer / tenant
+  const canViewMyInquiries = isLoggedIn && (isBuyer || isTenant);
+
   const handleLogout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
-
-    // Send user to login after logout
     navigate('/login');
   };
 
-  // ------------------------------------------------------------
-  // Decide logo click destination based on role
-  // ------------------------------------------------------------
   const getHomeRoute = () => {
     if (isPlatformAdmin) return '/societies';
     if (isSocietyAdmin) return '/my-properties';
-
-    // Buyer / Guest home
     return '/properties';
   };
 
@@ -95,13 +73,19 @@ export default function Navbar() {
         padding: '14px 28px',
         display: 'flex',
         justifyContent: 'space-between',
-        alignItems: 'center'
+        alignItems: 'center',
+        gap: '16px',
+        flexWrap: 'wrap'
       }}
     >
-      {/* --------------------------------------------------------
-          Left side navigation
-      -------------------------------------------------------- */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '18px' }}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '18px',
+          flexWrap: 'wrap'
+        }}
+      >
         <Link
           to={getHomeRoute()}
           style={{
@@ -114,13 +98,6 @@ export default function Navbar() {
           SocioDeal
         </Link>
 
-        {/* ------------------------------------------------------
-            Guest / Buyer public property marketplace
-
-            This is now strictly hidden for:
-            - society_admin
-            - platform_admin
-        ------------------------------------------------------ */}
         {canViewPublicProperties && (
           <Link
             to="/properties"
@@ -130,71 +107,50 @@ export default function Navbar() {
           </Link>
         )}
 
-        {/* ------------------------------------------------------
-            Society Admin menu
-        ------------------------------------------------------ */}
+        {canViewMyInquiries && (
+          <Link
+            to="/my-inquiries"
+            style={{ color: '#d1d5db', textDecoration: 'none' }}
+          >
+            My Inquiries
+          </Link>
+        )}
+
         {isSocietyAdmin && (
           <>
-            <Link
-              to="/my-properties"
-              style={{ color: '#d1d5db', textDecoration: 'none' }}
-            >
+            <Link to="/my-properties" style={{ color: '#d1d5db', textDecoration: 'none' }}>
               My Properties
             </Link>
 
-            <Link
-              to="/add-property"
-              style={{ color: '#d1d5db', textDecoration: 'none' }}
-            >
+            <Link to="/add-property" style={{ color: '#d1d5db', textDecoration: 'none' }}>
               Add Property
             </Link>
 
-            <Link
-              to="/inquiries"
-              style={{ color: '#d1d5db', textDecoration: 'none' }}
-            >
+            <Link to="/inquiries" style={{ color: '#d1d5db', textDecoration: 'none' }}>
               Inquiries
             </Link>
           </>
         )}
 
-        {/* ------------------------------------------------------
-            Platform Admin menu
-        ------------------------------------------------------ */}
         {isPlatformAdmin && (
           <>
-            <Link
-              to="/societies"
-              style={{ color: '#d1d5db', textDecoration: 'none' }}
-            >
+            <Link to="/societies" style={{ color: '#d1d5db', textDecoration: 'none' }}>
               Societies
             </Link>
 
-            <Link
-              to="/society-onboarding"
-              style={{ color: '#d1d5db', textDecoration: 'none' }}
-            >
+            <Link to="/society-onboarding" style={{ color: '#d1d5db', textDecoration: 'none' }}>
               Onboard Society
             </Link>
           </>
         )}
 
-        {/* ------------------------------------------------------
-            Guest login link
-        ------------------------------------------------------ */}
         {!isLoggedIn && (
-          <Link
-            to="/login"
-            style={{ color: '#d1d5db', textDecoration: 'none' }}
-          >
+          <Link to="/login" style={{ color: '#d1d5db', textDecoration: 'none' }}>
             Login
           </Link>
         )}
       </div>
 
-      {/* --------------------------------------------------------
-          Right side user info
-      -------------------------------------------------------- */}
       <div>
         {isLoggedIn ? (
           <>
