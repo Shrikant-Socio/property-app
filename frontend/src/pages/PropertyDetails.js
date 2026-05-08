@@ -1,20 +1,23 @@
 // ------------------------------------------------------------
 // PropertyDetails.js
 // ------------------------------------------------------------
-// SocioDeal - Buyer/Tenant Property Details Page
+// SocioDeal - Buyer/User Property Details Page
 //
 // This page handles:
 // 1. Property details display
 // 2. Property image gallery + enlarge modal
-// 3. Buyer/Tenant inquiry submission
-// 4. Duplicate inquiry handling with "Go to My Inquiries"
-// 5. Better success/error/warning UI
+// 3. Buyer inquiry submission
+// 4. Duplicate inquiry prevention
+// 5. Inquiry status card if inquiry already exists
+// 6. Inline mobile OTP verification before inquiry
 //
 // Important:
 // - Mobile-first UI
-// - Existing APIs are preserved
-// - Role-based inquiry access is preserved
-// - Buyer privacy is preserved: wing/flat number is NOT shown
+// - Existing property details/gallery preserved
+// - Buyer privacy preserved: wing_flat_no is NOT shown
+// - Frontend does NOT send name/phone in inquiry body
+// - Backend uses logged-in JWT user profile
+// - OTP UI is rendered ONLY ONCE
 // ------------------------------------------------------------
 
 import { useEffect, useState } from 'react';
@@ -35,29 +38,35 @@ export default function PropertyDetails() {
   const [loading, setLoading] = useState(true);
 
   // ------------------------------------------------------------
-  // Inquiry form states
+  // Inquiry states
   // ------------------------------------------------------------
-  const [selectedInquiryType, setSelectedInquiryType] = useState('INTERESTED');
+  const [selectedInquiryType, setSelectedInquiryType] = useState('interested');
   const [message, setMessage] = useState('');
   const [responseMsg, setResponseMsg] = useState('');
   const [responseType, setResponseType] = useState('');
   const [sending, setSending] = useState(false);
-// ------------------------------------------------------------
-// Existing inquiry detection
-// If buyer already sent inquiry for this property,
-// we will disable the inquiry form.
-// ------------------------------------------------------------
-const [alreadyInquired, setAlreadyInquired] = useState(false);
-// ------------------------------------------------------------
-// Store existing inquiry details.
-// This will help us show status card directly
-// on Property Details page.
-// ------------------------------------------------------------
-const [existingInquiryData, setExistingInquiryData] = useState(null);
+
+  // ------------------------------------------------------------
+  // Existing inquiry states
+  // ------------------------------------------------------------
+  const [alreadyInquired, setAlreadyInquired] = useState(false);
+  const [existingInquiryData, setExistingInquiryData] = useState(null);
+
+  // ------------------------------------------------------------
+  // OTP states
+  // OTP message uses responseMsg/responseType only.
+  // This prevents duplicate success/error messages.
+  // ------------------------------------------------------------
+  const [showOtpSection, setShowOtpSection] = useState(false);
+  const [otp, setOtp] = useState('');
+  const [otpSending, setOtpSending] = useState(false);
+  const [otpVerifying, setOtpVerifying] = useState(false);
+  const [devOtp, setDevOtp] = useState('');
+
   const token = localStorage.getItem('token');
 
   // ------------------------------------------------------------
-  // Read logged-in user safely from localStorage
+  // Safely read logged-in user from localStorage
   // ------------------------------------------------------------
   let user = null;
 
@@ -67,105 +76,81 @@ const [existingInquiryData, setExistingInquiryData] = useState(null);
     user = null;
   }
 
-  // ------------------------------------------------------------
-  // Buyer profile fields
-  // Defensive mapping is used because login response may store
-  // name/phone with different keys.
-  // ------------------------------------------------------------
-  const [buyerName, setBuyerName] = useState(
-    user?.full_name || user?.name || user?.username || ''
-  );
-
-  const [buyerPhone, setBuyerPhone] = useState(
-    user?.phone || user?.mobile || user?.contact || user?.phone_number || ''
-  );
+  const userRole = user?.role ? user.role.trim().toLowerCase() : '';
+  const isBuyerOrTenant = userRole === 'buyer' || userRole === 'tenant';
 
   // ------------------------------------------------------------
-  // Load property and images when page opens
+  // Load property, images, and existing inquiry check
   // ------------------------------------------------------------
- useEffect(() => {
-  fetchPropertyDetails();
-  fetchPropertyImages();
-  checkExistingInquiry();
+  useEffect(() => {
+    fetchPropertyDetails();
+    fetchPropertyImages();
+    checkExistingInquiry();
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   // ------------------------------------------------------------
-  // Quick inquiry options
-  // These reduce typing effort for buyer/tenant.
+  // Inquiry quick options
+  // Backend expects lowercase inquiry_type values.
   // ------------------------------------------------------------
   const inquiryOptions = [
     {
-      value: 'INTERESTED',
+      value: 'interested',
       label: 'Interested',
       icon: '❤️',
       defaultMessage: 'I am interested in this property. Please share more details.'
     },
     {
-      value: 'PRICE_NEGOTIATION',
+      value: 'schedule_visit',
+      label: 'Schedule Visit',
+      icon: '📅',
+      defaultMessage: 'I would like to schedule a site visit. Please share available timing.'
+    },
+    {
+      value: 'contact_me',
+      label: 'Contact Me',
+      icon: '📞',
+      defaultMessage: 'Please contact me regarding this property.'
+    },
+    {
+      value: 'price_negotiation',
       label: 'Price Negotiation',
       icon: '💬',
       defaultMessage: 'I am interested in this property and would like to discuss the price.'
     },
     {
-      value: 'MORE_DETAILS',
+      value: 'more_details',
       label: 'More Details',
       icon: 'ℹ️',
       defaultMessage: 'Please share more details about this property.'
-    },
-    {
-      value: 'SCHEDULE_VISIT',
-      label: 'Schedule Visit',
-      icon: '📅',
-      defaultMessage: 'I would like to schedule a site visit. Please share available timing.'
-   },
-   {
-      value: 'CONTACT_ME',
-      label: 'Contact Me',
-      icon: '📞',
-      defaultMessage: 'Please contact me regarding this property.'
-   }
+    }
   ];
 
-  // ------------------------------------------------------------
-  // Currency formatter
-  // ------------------------------------------------------------
   const formatCurrency = (value) => {
     if (!value) return 'N/A';
     return `₹${Number(value).toLocaleString('en-IN')}`;
   };
 
-  // ------------------------------------------------------------
-  // Date formatter
-  // ------------------------------------------------------------
   const formatDate = (value) => {
     if (!value) return 'N/A';
-    return new Date(value).toLocaleDateString('en-IN');
-  };
-// ------------------------------------------------------------
-// Convert inquiry status into readable label.
-// ------------------------------------------------------------
-const formatInquiryStatus = (status) => {
-  if (!status) return 'PENDING';
 
-  return status
-    .replaceAll('_', ' ')
-    .toUpperCase();
-};
-  // ------------------------------------------------------------
-  // Request type fallback logic
-  // Supports new request_type and old a_type for backward compatibility.
-  // ------------------------------------------------------------
+    return new Date(value).toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric'
+    });
+  };
+
+  const formatInquiryStatus = (status) => {
+    if (!status) return 'PENDING';
+    return String(status).replaceAll('_', ' ').toUpperCase();
+  };
+
   const getRequestType = () => {
     return String(property?.request_type || property?.a_type || 'SALE').toUpperCase();
   };
 
-  // ------------------------------------------------------------
-  // Price display logic
-  // RENT uses expected_rent.
-  // SALE uses expected_price or old price field.
-  // ------------------------------------------------------------
   const getDisplayPrice = () => {
     if (!property) return 'N/A';
 
@@ -182,9 +167,6 @@ const formatInquiryStatus = (status) => {
       : 'Price on request';
   };
 
-  // ------------------------------------------------------------
-  // Fetch property details
-  // ------------------------------------------------------------
   const fetchPropertyDetails = async () => {
     try {
       const res = await api.get(`/properties/${id}`);
@@ -197,10 +179,6 @@ const formatInquiryStatus = (status) => {
     }
   };
 
-  // ------------------------------------------------------------
-  // Fetch property images
-  // Supports multiple possible backend response shapes safely.
-  // ------------------------------------------------------------
   const fetchPropertyImages = async () => {
     try {
       const res = await api.get(`/properties/${id}/images`);
@@ -213,103 +191,65 @@ const formatInquiryStatus = (status) => {
 
       const cover = list.find((img) => img.is_cover === true) || list[0];
 
-      if (cover) {
-        setCoverImage(cover.image_url || cover.url || cover.secure_url);
-      } else {
-        setCoverImage(null);
-      }
+      setCoverImage(
+        cover ? cover.image_url || cover.url || cover.secure_url : null
+      );
     } catch (error) {
       console.error('Error fetching images:', error);
       setImages([]);
       setCoverImage(null);
     }
   };
+
   // ------------------------------------------------------------
-// Check whether buyer already sent inquiry
-// for current property.
-//
-// UX improvement:
-// Prevent duplicate inquiry before submit.
-// ------------------------------------------------------------
-const checkExistingInquiry = async () => {
-  try {
-    // Only logged-in buyer/tenant should check inquiries.
-    if (!token) return;
+  // Check if buyer already sent inquiry for this property
+  // ------------------------------------------------------------
+  const checkExistingInquiry = async () => {
+    try {
+      if (!token || !isBuyerOrTenant) return;
 
-    if (
-      user?.role !== 'buyer' &&
-      user?.role !== 'tenant'
-    ) {
-      return;
-    }
+      const res = await api.get('/my-inquiries', {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
 
-    const res = await api.get('/my-inquiries', {
-      headers: {
-        Authorization: `Bearer ${token}`
+      const inquiryList = Array.isArray(res.data)
+        ? res.data
+        : res.data?.data || res.data?.inquiries || [];
+
+      const existingInquiry = inquiryList.find((item) => {
+        return Number(item.property_id) === Number(id);
+      });
+
+      if (existingInquiry) {
+        setAlreadyInquired(true);
+        setExistingInquiryData(existingInquiry);
+      } else {
+        setAlreadyInquired(false);
+        setExistingInquiryData(null);
       }
-    });
+    } catch (error) {
+      console.error('Error checking existing inquiry:', error);
+      setAlreadyInquired(false);
+      setExistingInquiryData(null);
+    }
+  };
 
-    // Defensive handling for different API response shapes.
-    const inquiryList = Array.isArray(res.data)
-      ? res.data
-      : res.data?.data || res.data?.inquiries || [];
-
-    // Match current property.
-    const existingInquiry = inquiryList.find((item) => {
-      return Number(item.property_id) === Number(id);
-    });
-
-    // If found, disable inquiry form.
-    if (existingInquiry) {
-  setAlreadyInquired(true);
-
-  // Save inquiry details for status card UI.
-  setExistingInquiryData(existingInquiry);
-} else {
-  setAlreadyInquired(false);
-  setExistingInquiryData(null);
-}
-  } catch (error) {
-    console.error('Error checking existing inquiry:', error);
-
-    // Do NOT block user if API fails.
-    setAlreadyInquired(false);
-  }
-};
-
-  // ------------------------------------------------------------
-  // Handle quick option select
-  // ------------------------------------------------------------
   const handleInquiryTypeSelect = (option) => {
     setSelectedInquiryType(option.value);
-
-    // Auto-fill helpful message.
-    // Buyer can edit or clear because message is optional.
     setMessage(option.defaultMessage);
-
-    // Clear previous response when buyer changes option.
     setResponseMsg('');
     setResponseType('');
   };
 
   // ------------------------------------------------------------
   // Submit inquiry
+  // If backend requires OTP, show OTP section once.
   // ------------------------------------------------------------
   const handleSendInquiry = async () => {
     if (!token) {
       navigate('/login');
-      return;
-    }
-
-    if (!buyerName.trim()) {
-      setResponseType('error');
-      setResponseMsg('Please enter your name before sending inquiry.');
-      return;
-    }
-
-    if (!buyerPhone.trim()) {
-      setResponseType('error');
-      setResponseMsg('Please enter your mobile number before sending inquiry.');
       return;
     }
 
@@ -323,9 +263,7 @@ const checkExistingInquiry = async () => {
         {
           property_id: Number(id),
           inquiry_type: selectedInquiryType,
-          message: message.trim(),
-          buyer_name: buyerName.trim(),
-          buyer_phone: buyerPhone.trim()
+          message: message.trim()
         },
         {
           headers: {
@@ -335,8 +273,13 @@ const checkExistingInquiry = async () => {
       );
 
       setResponseType('success');
-      setResponseMsg('Inquiry sent successfully. Society admin will review and respond.');
+      setResponseMsg('Inquiry submitted successfully.');
       setMessage('');
+      setShowOtpSection(false);
+      setOtp('');
+      setDevOtp('');
+
+      await checkExistingInquiry();
     } catch (error) {
       console.error('Error sending inquiry:', error);
 
@@ -345,32 +288,126 @@ const checkExistingInquiry = async () => {
         error.response?.data?.error ||
         'Failed to send inquiry. Please try again.';
 
+      const normalizedMsg = backendMsg.toLowerCase();
+
+      const requiresOtp =
+        normalizedMsg.includes('verify your mobile number') ||
+        normalizedMsg.includes('mobile number before sending inquiry');
+
       const isDuplicate =
-        backendMsg.toLowerCase().includes('already') ||
-        backendMsg.toLowerCase().includes('duplicate');
+        normalizedMsg.includes('already') ||
+        normalizedMsg.includes('duplicate');
 
-      setResponseType(isDuplicate ? 'warning' : 'error');
-
-      setResponseMsg(
-        isDuplicate
-          ? 'You have already sent inquiry for this property.'
-          : backendMsg
-      );
+      if (requiresOtp) {
+        setShowOtpSection(true);
+        setResponseType('warning');
+        setResponseMsg('Please verify your mobile number before sending inquiry.');
+      } else if (isDuplicate) {
+        setShowOtpSection(false);
+        setResponseType('warning');
+        setResponseMsg('You have already sent an inquiry for this property.');
+        await checkExistingInquiry();
+      } else {
+        setResponseType('error');
+        setResponseMsg(backendMsg);
+      }
     } finally {
       setSending(false);
     }
   };
 
   // ------------------------------------------------------------
-  // Loading state
+  // Send OTP
   // ------------------------------------------------------------
+  const handleSendOtp = async () => {
+    try {
+      setOtpSending(true);
+      setResponseMsg('');
+      setResponseType('');
+
+      const res = await api.post(
+        '/send-phone-otp',
+        {},
+        {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        }
+      );
+
+      if (res.data?.dev_otp) {
+        setDevOtp(res.data.dev_otp);
+      }
+
+      setResponseType('success');
+      setResponseMsg('OTP sent successfully. Please enter the OTP below.');
+    } catch (error) {
+      console.error('OTP send error:', error);
+
+      setResponseType('error');
+      setResponseMsg(
+        error.response?.data?.message ||
+          'Failed to send OTP. Please try again.'
+      );
+    } finally {
+      setOtpSending(false);
+    }
+  };
+
+  // ------------------------------------------------------------
+  // Verify OTP
+  // On success:
+  // - hide OTP section
+  // - clear OTP input
+  // - show only one success message
+  // ------------------------------------------------------------
+  const handleVerifyOtp = async () => {
+    if (!otp.trim()) {
+      setResponseType('error');
+      setResponseMsg('Please enter OTP.');
+      return;
+    }
+
+    try {
+      setOtpVerifying(true);
+      setResponseMsg('');
+      setResponseType('');
+
+      await api.post(
+        '/verify-phone-otp',
+        {
+          otp: otp.trim()
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        }
+      );
+
+      setShowOtpSection(false);
+      setOtp('');
+      setDevOtp('');
+
+      setResponseType('success');
+      setResponseMsg('Mobile number verified successfully. Please send inquiry again.');
+    } catch (error) {
+      console.error('OTP verify error:', error);
+
+      setResponseType('error');
+      setResponseMsg(
+        error.response?.data?.message ||
+          'OTP verification failed. Please try again.'
+      );
+    } finally {
+      setOtpVerifying(false);
+    }
+  };
+
   if (loading) {
     return <p className="page-container">Loading property...</p>;
   }
 
-  // ------------------------------------------------------------
-  // Property not found state
-  // ------------------------------------------------------------
   if (!property) {
     return (
       <div className="page-container">
@@ -386,9 +423,6 @@ const checkExistingInquiry = async () => {
     <div className="page-container property-details-page">
       <Link to="/properties">⬅ Back</Link>
 
-      {/* --------------------------------------------------------
-          Image section
-      -------------------------------------------------------- */}
       <div className="details-image-section">
         <div
           className="details-cover-image"
@@ -421,9 +455,6 @@ const checkExistingInquiry = async () => {
         )}
       </div>
 
-      {/* --------------------------------------------------------
-          Basic property summary
-      -------------------------------------------------------- */}
       <div className="card" style={{ marginTop: '16px' }}>
         <h2>
           {property.c_type} {requestType === 'RENT' ? 'for Rent' : 'for Sale'}
@@ -438,9 +469,6 @@ const checkExistingInquiry = async () => {
         </p>
       </div>
 
-      {/* --------------------------------------------------------
-          Property details grid
-      -------------------------------------------------------- */}
       <div className="card details-grid">
         <div>
           <b>Configuration</b>
@@ -477,93 +505,75 @@ const checkExistingInquiry = async () => {
         </div>
       </div>
 
-      {/* --------------------------------------------------------
-          Description
-      -------------------------------------------------------- */}
       <div className="card">
         <h3>Description</h3>
         <p>{property.property_description || 'No description available'}</p>
       </div>
 
-      {/* --------------------------------------------------------
-          Inquiry section
-      -------------------------------------------------------- */}
       <div className="card" style={styles.inquiryCard}>
         <h3 style={styles.inquiryTitle}>Send Inquiry</h3>
 
         <p className="muted" style={styles.inquirySubtitle}>
-          Choose a quick option, confirm your details, and send inquiry.
+          Choose a quick option and send your inquiry in minimum time.
         </p>
 
-       {!token ? (
-  <button
-    className="btn btn-primary full-btn"
-    onClick={() => navigate('/login')}
-  >
-    Login to Continue
-  </button>
-) : (user?.role === 'buyer' || user?.role === 'tenant') && alreadyInquired ? (
- <div
-  style={{
-    ...styles.responseBox,
-    ...styles.warningBox
-  }}
->
-  <div style={styles.responseText}>
-    <strong>Inquiry Already Sent</strong>
+        {!token ? (
+          <button
+            className="btn btn-primary full-btn"
+            onClick={() => navigate('/login')}
+          >
+            Login to Continue
+          </button>
+        ) : isBuyerOrTenant && alreadyInquired ? (
+          <div
+            style={{
+              ...styles.responseBox,
+              ...styles.warningBox
+            }}
+          >
+            <div style={styles.responseText}>
+              <strong>Inquiry Already Sent</strong>
+              <p>You already sent inquiry for this property.</p>
+            </div>
 
-    <p>
-      You already sent inquiry for this property.
-    </p>
-  </div>
+            <div style={styles.statusCard}>
+              <div style={styles.statusRow}>
+                <span style={styles.statusLabel}>Status</span>
 
-  {/* --------------------------------------------------------
-      Inquiry status details
-  -------------------------------------------------------- */}
-  <div style={styles.statusCard}>
-    <div style={styles.statusRow}>
-      <span style={styles.statusLabel}>Status</span>
+                <span style={styles.statusBadge}>
+                  {formatInquiryStatus(existingInquiryData?.status)}
+                </span>
+              </div>
 
-      <span style={styles.statusBadge}>
-        {formatInquiryStatus(existingInquiryData?.status)}
-      </span>
-    </div>
+              {existingInquiryData?.visit_date && (
+                <div style={styles.statusItem}>
+                  📅 Visit Date: {formatDate(existingInquiryData.visit_date)}
+                </div>
+              )}
 
-    {existingInquiryData?.visit_date && (
-      <div style={styles.statusItem}>
-        📅 Visit Date:
-        {' '}
-        {formatDate(existingInquiryData.visit_date)}
-      </div>
-    )}
+              {existingInquiryData?.visit_time && (
+                <div style={styles.statusItem}>
+                  🕒 Visit Time: {existingInquiryData.visit_time}
+                </div>
+              )}
 
-    {existingInquiryData?.visit_time && (
-      <div style={styles.statusItem}>
-        🕒 Visit Time:
-        {' '}
-        {existingInquiryData.visit_time}
-      </div>
-    )}
+              {(existingInquiryData?.notes || existingInquiryData?.admin_note) && (
+                <div style={styles.statusItem}>
+                  💬 Admin Note: {existingInquiryData.notes || existingInquiryData.admin_note}
+                </div>
+              )}
+            </div>
 
-    {existingInquiryData?.admin_note && (
-      <div style={styles.statusItem}>
-        💬 Admin Note:
-        {' '}
-        {existingInquiryData.admin_note}
-      </div>
-    )}
-  </div>
-
-  <button
-    type="button"
-    style={styles.secondaryActionButton}
-    onClick={() => navigate('/my-inquiries')}
-  >
-    Go to My Inquiries
-  </button>
-</div>
-) : user?.role === 'buyer' || user?.role === 'tenant' ? (
-  <>
+            <button
+              type="button"
+              style={styles.secondaryActionButton}
+              onClick={() => navigate('/my-inquiries')}
+            >
+              Go to My Inquiries
+            </button>
+          </div>
+        ) : isBuyerOrTenant ? (
+          <>
             <div style={styles.quickOptions}>
               {inquiryOptions.map((option) => {
                 const isActive = selectedInquiryType === option.value;
@@ -585,28 +595,6 @@ const checkExistingInquiry = async () => {
               })}
             </div>
 
-            <div style={styles.profileGrid}>
-              <div>
-                <label style={styles.label}>Your Name</label>
-                <input
-                  className="input"
-                  value={buyerName}
-                  onChange={(e) => setBuyerName(e.target.value)}
-                  placeholder="Enter your name"
-                />
-              </div>
-
-              <div>
-                <label style={styles.label}>Mobile Number</label>
-                <input
-                  className="input"
-                  value={buyerPhone}
-                  onChange={(e) => setBuyerPhone(e.target.value)}
-                  placeholder="Enter mobile number"
-                />
-              </div>
-            </div>
-
             <div style={styles.messageBlock}>
               <label style={styles.label}>Message Optional</label>
               <textarea
@@ -618,6 +606,50 @@ const checkExistingInquiry = async () => {
               />
             </div>
 
+            {/* OTP section rendered only once here */}
+            {showOtpSection && (
+              <div style={styles.otpSection}>
+                <p style={styles.otpTitle}>Mobile Verification Required</p>
+
+                <p style={styles.otpHelpText}>
+                  To keep SocioDeal genuine and safe, please verify your mobile
+                  number before sending inquiry.
+                </p>
+
+                <button
+                  type="button"
+                  style={styles.otpButton}
+                  onClick={handleSendOtp}
+                  disabled={otpSending}
+                >
+                  {otpSending ? 'Sending OTP...' : 'Send OTP'}
+                </button>
+
+                <input
+                  className="input"
+                  value={otp}
+                  onChange={(e) => setOtp(e.target.value)}
+                  placeholder="Enter 6-digit OTP"
+                  maxLength="6"
+                />
+
+                <button
+                  type="button"
+                  style={styles.verifyOtpButton}
+                  onClick={handleVerifyOtp}
+                  disabled={otpVerifying}
+                >
+                  {otpVerifying ? 'Verifying...' : 'Verify OTP'}
+                </button>
+
+                {devOtp && (
+                  <p style={styles.devOtpText}>
+                    Dev OTP: {devOtp}
+                  </p>
+                )}
+              </div>
+            )}
+
             <button
               className="btn btn-primary full-btn"
               onClick={handleSendInquiry}
@@ -627,9 +659,10 @@ const checkExistingInquiry = async () => {
             </button>
           </>
         ) : (
-          <p>Only buyer/tenant can send inquiry.</p>
+          <p>Only buyer/user can send inquiry.</p>
         )}
 
+        {/* Single common response message area. No OTP UI here. */}
         {responseMsg && (
           <div
             style={{
@@ -646,29 +679,16 @@ const checkExistingInquiry = async () => {
                 {responseType === 'success'
                   ? 'Success'
                   : responseType === 'warning'
-                    ? 'Already Sent'
-                    : 'Action Required'}
+                    ? 'Action Required'
+                    : 'Error'}
               </strong>
 
               <p>{responseMsg}</p>
             </div>
-
-            {(responseType === 'success' || responseType === 'warning') && (
-              <button
-                type="button"
-                style={styles.secondaryActionButton}
-                onClick={() => navigate('/my-inquiries')}
-              >
-                Go to My Inquiries
-              </button>
-            )}
           </div>
         )}
       </div>
 
-      {/* --------------------------------------------------------
-          Image enlarge modal
-      -------------------------------------------------------- */}
       {selectedImage && (
         <div
           className="image-modal-backdrop"
@@ -693,11 +713,6 @@ const checkExistingInquiry = async () => {
   );
 }
 
-// ------------------------------------------------------------
-// Local styles
-// Kept inside this file so you can replace only PropertyDetails.js.
-// Existing global CSS classes are still reused.
-// ------------------------------------------------------------
 const styles = {
   inquiryCard: {
     marginTop: '16px'
@@ -740,13 +755,6 @@ const styles = {
     color: '#ffffff',
     borderColor: '#111827',
     boxShadow: '0 8px 20px rgba(17, 24, 39, 0.18)'
-  },
-
-  profileGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-    gap: '14px',
-    marginTop: '6px'
   },
 
   label: {
@@ -801,39 +809,92 @@ const styles = {
     cursor: 'pointer',
     fontSize: '14px'
   },
+
   statusCard: {
-  background: '#ffffff',
-  borderRadius: '12px',
-  padding: '12px',
-  border: '1px solid #fed7aa',
-  display: 'grid',
-  gap: '10px'
-},
+    background: '#ffffff',
+    borderRadius: '12px',
+    padding: '12px',
+    border: '1px solid #fed7aa',
+    display: 'grid',
+    gap: '10px'
+  },
 
-statusRow: {
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'center',
-  gap: '10px'
-},
+  statusRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '10px'
+  },
 
-statusLabel: {
-  fontWeight: '800',
-  color: '#111827'
-},
+  statusLabel: {
+    fontWeight: '800',
+    color: '#111827'
+  },
 
-statusBadge: {
-  background: '#111827',
-  color: '#ffffff',
-  padding: '6px 10px',
-  borderRadius: '999px',
-  fontSize: '12px',
-  fontWeight: '800'
-},
+  statusBadge: {
+    background: '#111827',
+    color: '#ffffff',
+    padding: '6px 10px',
+    borderRadius: '999px',
+    fontSize: '12px',
+    fontWeight: '800'
+  },
 
-statusItem: {
-  fontSize: '14px',
-  color: '#374151',
-  lineHeight: '1.5'
-}
+  statusItem: {
+    fontSize: '14px',
+    color: '#374151',
+    lineHeight: '1.5'
+  },
+
+  otpSection: {
+    marginTop: '18px',
+    padding: '14px',
+    borderRadius: '14px',
+    background: '#eff6ff',
+    border: '1px solid #bfdbfe',
+    display: 'grid',
+    gap: '12px'
+  },
+
+  otpTitle: {
+    margin: 0,
+    fontWeight: '900',
+    color: '#1e3a8a'
+  },
+
+  otpHelpText: {
+    margin: 0,
+    color: '#1f2937',
+    fontSize: '14px',
+    lineHeight: '1.5'
+  },
+
+  otpButton: {
+    width: '100%',
+    border: 'none',
+    background: '#2563eb',
+    color: '#ffffff',
+    padding: '12px',
+    borderRadius: '12px',
+    fontWeight: '800',
+    cursor: 'pointer'
+  },
+
+  verifyOtpButton: {
+    width: '100%',
+    border: 'none',
+    background: '#16a34a',
+    color: '#ffffff',
+    padding: '12px',
+    borderRadius: '12px',
+    fontWeight: '800',
+    cursor: 'pointer'
+  },
+
+  devOtpText: {
+    margin: 0,
+    fontSize: '13px',
+    color: '#374151',
+    fontWeight: '700'
+  }
 };

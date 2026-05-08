@@ -259,6 +259,8 @@ app.post("/login", async (req, res) => {
         email: user.email,
         role: user.role,
         society_id: user.society_id,
+        phone_verified: user.phone_verified,
+        phone_verified_at: user.phone_verified_at,
       },
       process.env.JWT_SECRET,
       { expiresIn: "1d" }
@@ -2057,10 +2059,24 @@ app.patch(
 );
 
 // ==========================================================
-// INQUIRY APIs - ENHANCED FLOW
+// OTP + INQUIRY APIs - BUYER/TENANT VERIFIED MOBILE FLOW
+// ==========================================================
+// Purpose:
+// - Buyer/Tenant must verify their own registered mobile number before inquiry.
+// - OTP is stored as a hash, never as plain text.
+// - Local development can return OTP for testing only when NODE_ENV !== "production".
+// - Inquiry creation trusts logged-in JWT user profile, not name/phone from request body.
+// - Society admin inquiry visibility remains isolated by society_id.
 // ==========================================================
 
-// Allowed inquiry types (as per DB)
+// Allowed OTP purpose for this phase.
+const OTP_PURPOSE_PHONE_VERIFICATION = "phone_verification";
+
+// OTP configuration constants.
+const OTP_EXPIRY_MINUTES = 5;
+const OTP_MAX_ATTEMPTS = 5;
+
+// Allowed inquiry types as per DB check constraint chk_inquiry_type.
 const ALLOWED_INQUIRY_TYPES = [
   "interested",
   "schedule_visit",
@@ -2069,7 +2085,7 @@ const ALLOWED_INQUIRY_TYPES = [
   "more_details",
 ];
 
-// Allowed statuses
+// Allowed inquiry statuses as per DB check constraint chk_inquiry_status.
 const ALLOWED_INQUIRY_STATUSES = [
   "requested",
   "contacted",
@@ -2081,79 +2097,508 @@ const ALLOWED_INQUIRY_STATUSES = [
   "rejected",
 ];
 
-// Normalize inquiry type
+// ----------------------------------------------------------
+// Helper: Normalize inquiry type from frontend.
+// If frontend does not send inquiry_type, default to "interested"
+// for backward compatibility with older inquiry flow.
+// ----------------------------------------------------------
 function normalizeInquiryType(value) {
   if (!value) return "interested";
-  const v = String(value).toLowerCase().trim();
-  return ALLOWED_INQUIRY_TYPES.includes(v) ? v : null;
+
+  const normalized = String(value).toLowerCase().trim();
+
+  return ALLOWED_INQUIRY_TYPES.includes(normalized) ? normalized : null;
 }
 
-// Normalize mobile
+// ----------------------------------------------------------
+// Helper: Normalize mobile number.
+// Keeps only digits so values like "+91 98765 43210" become "919876543210".
+// Current validation below expects final Indian 10-digit format.
+// ----------------------------------------------------------
 function normalizeMobile(value) {
   if (!value) return "";
   return String(value).replace(/\D/g, "");
 }
 
-// Validate Indian mobile
-function isValidMobile(value) {
-  return /^[6-9]\d{9}$/.test(value);
+// ----------------------------------------------------------
+// Helper: Validate Indian 10-digit mobile number.
+// Starts with 6/7/8/9 and has exactly 10 digits.
+// ----------------------------------------------------------
+function isValidIndianMobile(value) {
+  const mobile = normalizeMobile(value);
+  return /^[6-9]\d{9}$/.test(mobile);
+}
+
+// ----------------------------------------------------------
+// Helper: Generate 6-digit OTP as string.
+// Example: "042391" is possible and should remain 6 digits.
+// ----------------------------------------------------------
+function generateSixDigitOtp() {
+  return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 // ==========================================================
-// CREATE INQUIRY (BUYER / TENANT)
+// PHONE OTP APIs - BUYER / TENANT MOBILE VERIFICATION
 // ==========================================================
+// Purpose:
+// - Buyer/Tenant must verify mobile before sending inquiry
+// - OTP is stored as bcrypt hash, never as plain text
+// - Local dev may return dev_otp for testing
+// - Production must never return OTP
+// ==========================================================
+
+// Generate 6 digit OTP as string
+function generateSixDigitOtp() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// ==========================================================
+// SEND PHONE OTP
+// API: POST /send-phone-otp
+// Auth: buyer / tenant only
+// Body: not required
+// ==========================================================
+
+app.post(
+  "/send-phone-otp",
+  authenticateToken,
+  authorizeRoles("buyer", "tenant"),
+  async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+          console.log("VERIFY OTP TOKEN USER:", req.user);
+          console.log("VERIFY OTP BODY:", req.body);
+      // ------------------------------------------------------
+      // Always use logged-in user's phone from users table.
+      // Do not trust phone from request body.
+      // ------------------------------------------------------
+      const userResult = await client.query(
+        `SELECT user_id, full_name, phone, phone_verified
+         FROM users
+         WHERE user_id = $1`,
+        [req.user.user_id]
+      );
+
+      if (userResult.rows.length === 0) {
+        return res.status(404).json({
+          message: "User not found",
+        });
+      }
+
+      const user = userResult.rows[0];
+
+      if (!user.phone) {
+        return res.status(400).json({
+          message: "Mobile number is not available in your profile",
+        });
+      }
+
+      // Optional but recommended:
+      // If already verified, no need to generate another OTP.
+      if (user.phone_verified === true) {
+        return res.status(200).json({
+          message: "Mobile number is already verified",
+          phone_verified: true,
+        });
+      }
+
+      const otp = generateSixDigitOtp();
+
+      // Hash OTP before storing.
+      // This prevents plain OTP leakage from DB.
+      const otpHash = await bcrypt.hash(otp, 10);
+
+      await client.query("BEGIN");
+
+      // ------------------------------------------------------
+      // Cancel all previous pending OTPs for same user + phone.
+      // This ensures only latest OTP can be verified.
+      // ------------------------------------------------------
+      await client.query(
+        `UPDATE otp_verifications
+         SET status = 'cancelled',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = $1
+           AND phone = $2
+           AND purpose = 'phone_verification'
+           AND status = 'pending'`,
+        [user.user_id, user.phone]
+      );
+
+      // ------------------------------------------------------
+      // Insert fresh OTP row.
+      // OTP expires after 5 minutes.
+      // ------------------------------------------------------
+      const otpResult = await client.query(
+        `INSERT INTO otp_verifications
+         (
+           user_id,
+           phone,
+           otp_hash,
+           purpose,
+           expires_at,
+           attempts,
+           status,
+           created_at,
+           updated_at
+         )
+         VALUES
+         (
+           $1,
+           $2,
+           $3,
+           'phone_verification',
+           CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+           0,
+           'pending',
+           CURRENT_TIMESTAMP,
+           CURRENT_TIMESTAMP
+         )
+         RETURNING otp_id, phone, purpose, expires_at, status`,
+        [user.user_id, user.phone, otpHash]
+      );
+
+      await client.query("COMMIT");
+
+      const response = {
+        message: "OTP sent successfully",
+        phone: user.phone,
+        expires_at: otpResult.rows[0].expires_at,
+      };
+
+      // Only for local/dev testing.
+      // Never return OTP in production.
+      if (process.env.NODE_ENV !== "production") {
+        response.dev_otp = otp;
+      }
+
+      return res.status(200).json(response);
+    } catch (err) {
+      await client.query("ROLLBACK");
+
+      console.error("Send phone OTP error:", err);
+
+      return res.status(500).json({
+        message: "Failed to send OTP",
+        error: err.message,
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ==========================================================
+// VERIFY PHONE OTP
+// API: POST /verify-phone-otp
+// Auth: buyer / tenant only
+// Body:
+// {
+//   "otp": "123456"
+// }
+// ==========================================================
+
+app.post(
+  "/verify-phone-otp",
+  authenticateToken,
+  authorizeRoles("buyer", "tenant"),
+  async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const { otp } = req.body;
+
+      if (!otp) {
+        return res.status(400).json({
+          message: "OTP is required",
+        });
+      }
+
+      const enteredOtp = String(otp).trim();
+
+      if (!/^\d{6}$/.test(enteredOtp)) {
+        return res.status(400).json({
+          message: "OTP must be a 6-digit number",
+        });
+      }
+
+      // ------------------------------------------------------
+      // Always use logged-in user's phone.
+      // Buyer cannot verify another user's phone.
+      // ------------------------------------------------------
+      const userResult = await client.query(
+        `SELECT user_id, phone, phone_verified
+         FROM users
+         WHERE user_id = $1`,
+        [req.user.user_id]
+      );
+
+      if (userResult.rows.length === 0) {
+        return res.status(404).json({
+          message: "User not found",
+        });
+      }
+
+      const user = userResult.rows[0];
+
+      if (!user.phone) {
+        return res.status(400).json({
+          message: "Mobile number is not available in your profile",
+        });
+      }
+
+      if (user.phone_verified === true) {
+        return res.status(200).json({
+          message: "Mobile number is already verified",
+          phone_verified: true,
+        });
+      }
+
+      await client.query("BEGIN");
+
+      // ------------------------------------------------------
+      // Fetch latest pending OTP only.
+      // Important:
+      // - status must be pending
+      // - same user
+      // - same phone
+      // - purpose phone_verification
+      // - latest OTP wins
+      // ------------------------------------------------------
+      const otpResult = await client.query(
+        `SELECT
+           otp_id,
+           otp_hash,
+           expires_at,
+           attempts,
+           status
+         FROM otp_verifications
+         WHERE user_id = $1
+           AND phone = $2
+           AND purpose = 'phone_verification'
+           AND status = 'pending'
+         ORDER BY otp_id DESC
+         LIMIT 1
+         FOR UPDATE`,
+        [user.user_id, user.phone]
+      );
+
+      if (otpResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+          message: "No active OTP found. Please request a new OTP.",
+        });
+      }
+
+      const otpRow = otpResult.rows[0];
+
+      // ------------------------------------------------------
+      // Expiry check.
+      // Expired OTP must not verify user.
+      // ------------------------------------------------------
+      const now = new Date();
+      const expiresAt = new Date(otpRow.expires_at);
+
+      if (expiresAt <= now) {
+        await client.query(
+          `UPDATE otp_verifications
+           SET status = 'expired',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE otp_id = $1`,
+          [otpRow.otp_id]
+        );
+
+        await client.query("COMMIT");
+
+        return res.status(400).json({
+          message: "OTP expired",
+        });
+      }
+
+      // ------------------------------------------------------
+      // Attempt limit check.
+      // If already too many attempts, fail OTP.
+      // ------------------------------------------------------
+      if (Number(otpRow.attempts) >= 5) {
+        await client.query(
+          `UPDATE otp_verifications
+           SET status = 'failed',
+               updated_at = CURRENT_TIMESTAMP
+           WHERE otp_id = $1`,
+          [otpRow.otp_id]
+        );
+
+        await client.query("COMMIT");
+
+        return res.status(400).json({
+          message: "Maximum OTP attempts exceeded. Please request a new OTP.",
+        });
+      }
+
+      // ------------------------------------------------------
+      // Critical security check:
+      // Compare entered OTP with bcrypt hash.
+      // Invalid OTP must NOT update users table.
+      // ------------------------------------------------------
+      const isOtpValid = await bcrypt.compare(enteredOtp, otpRow.otp_hash);
+
+      if (!isOtpValid) {
+        const newAttempts = Number(otpRow.attempts) + 1;
+        const newStatus = newAttempts >= 5 ? "failed" : "pending";
+
+        await client.query(
+          `UPDATE otp_verifications
+           SET attempts = $1,
+               status = $2,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE otp_id = $3`,
+          [newAttempts, newStatus, otpRow.otp_id]
+        );
+
+        await client.query("COMMIT");
+
+        return res.status(400).json({
+          message:
+            newStatus === "failed"
+              ? "Maximum OTP attempts exceeded. Please request a new OTP."
+              : "Invalid OTP",
+          attempts_remaining: Math.max(0, 5 - newAttempts),
+        });
+      }
+
+      // ------------------------------------------------------
+      // Success:
+      // - mark OTP verified
+      // - update user's phone_verified fields
+      // - only correct latest pending unexpired OTP reaches here
+      // ------------------------------------------------------
+      await client.query(
+        `UPDATE otp_verifications
+         SET status = 'verified',
+             verified_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE otp_id = $1`,
+        [otpRow.otp_id]
+      );
+
+      const updatedUserResult = await client.query(
+        `UPDATE users
+         SET phone_verified = true,
+             phone_verified_at = CURRENT_TIMESTAMP
+         WHERE user_id = $1
+         RETURNING user_id, full_name, email, phone, role, phone_verified, phone_verified_at`,
+        [user.user_id]
+      );
+
+      await client.query("COMMIT");
+
+      return res.status(200).json({
+        message: "Mobile number verified successfully",
+        phone_verified: true,
+        user: updatedUserResult.rows[0],
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+
+      console.error("Verify phone OTP error:", err);
+
+      return res.status(500).json({
+        message: "Failed to verify OTP",
+        error: err.message,
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ==========================================================
+// CREATE INQUIRY - BUYER / TENANT ONLY
+// ==========================================================
+// API:
+// POST /inquiry
+//
+// Important security rule:
+// - We use users.full_name and users.phone from DB.
+// - We do NOT trust name/phone sent from frontend body.
+// - This prevents buyer A from submitting inquiry using buyer B details.
+// ==========================================================
+
 app.post(
   "/inquiry",
   authenticateToken,
   authorizeRoles("buyer", "tenant"),
   async (req, res) => {
     try {
-      const { property_id, name, phone, message, inquiry_type } = req.body;
+      const { property_id, message, inquiry_type } = req.body;
 
       if (!property_id) {
-        return res.status(400).json({ message: "property_id is required" });
+        return res.status(400).json({
+          message: "property_id is required",
+        });
       }
 
       const finalType = normalizeInquiryType(inquiry_type);
 
       if (!finalType) {
         return res.status(400).json({
-          message: "Invalid inquiry_type",
+          message:
+            "Invalid inquiry_type. Allowed values: interested, schedule_visit, contact_me, price_negotiation, more_details",
         });
       }
 
-      // Get user info
+      // Fetch logged-in buyer/tenant profile from DB.
+      // This is also where we enforce phone_verified before inquiry.
       const userResult = await pool.query(
-        `SELECT full_name, phone FROM users WHERE user_id = $1`,
+        `SELECT user_id, full_name, phone, phone_verified, phone_verified_at
+         FROM users
+         WHERE user_id = $1`,
         [req.user.user_id]
       );
 
-      const user = userResult.rows[0];
+      if (userResult.rows.length === 0) {
+        return res.status(404).json({
+          message: "Logged-in user not found",
+        });
+      }
 
+      const user = userResult.rows[0];
       const finalName = String(user.full_name || "").trim();
       const finalPhone = normalizeMobile(user.phone);
 
       if (!finalName) {
         return res.status(400).json({
-          message: "Name is required",
+          message: "Name is required in your profile before sending inquiry",
         });
       }
 
-      if (!isValidMobile(finalPhone)) {
+      if (!isValidIndianMobile(finalPhone)) {
         return res.status(400).json({
-          message: "Valid mobile number required",
+          message: "Valid mobile number is required in your profile before sending inquiry",
+        });
+      }
+
+      if (user.phone_verified !== true) {
+        return res.status(403).json({
+          message: "Please verify your mobile number before sending inquiry.",
+          phone_verified: false,
         });
       }
 
       const propertyResult = await pool.query(
         `SELECT prop_id, society_id
          FROM properties
-         WHERE prop_id = $1`,
+         WHERE prop_id = $1
+           AND COALESCE(property_status, 'AVAILABLE') = 'AVAILABLE'`,
         [property_id]
       );
 
       if (propertyResult.rows.length === 0) {
-        return res.status(404).json({ message: "Property not found" });
+        return res.status(404).json({
+          message: "Property not found or not available",
+        });
       }
 
       const property = propertyResult.rows[0];
@@ -2170,19 +2615,23 @@ app.post(
            inquiry_type,
            status,
            mobile_verified,
-           last_status_updated_at
+           mobile_verified_at,
+           last_status_updated_at,
+           status_updated_by
          )
          VALUES
-         ($1,$2,$3,$4,$5,$6,$7,'requested',false,CURRENT_TIMESTAMP)
+         ($1, $2, $3, $4, $5, $6, $7, 'requested', $8, $9, CURRENT_TIMESTAMP, null)
          RETURNING *`,
         [
           property_id,
           req.user.user_id,
           finalName,
           finalPhone,
-          message || null,
+          toNull(message),
           property.society_id,
           finalType,
+          user.phone_verified,
+          user.phone_verified_at,
         ]
       );
 
@@ -2191,27 +2640,35 @@ app.post(
         inquiry: result.rows[0],
       });
     } catch (err) {
-  // Handle duplicate inquiry gracefully
-  // Constraint: uq_inquiry_user_property = one buyer can inquire once per property
-  if (err.code === "23505" && err.constraint === "uq_inquiry_user_property") {
-    return res.status(409).json({
-      message: "You have already sent an inquiry for this property",
-    });
-  }
+      // Duplicate inquiry rule:
+      // DB constraint uq_inquiry_user_property allows only one inquiry
+      // from same buyer/tenant for same property.
+      if (err.code === "23505" && err.constraint === "uq_inquiry_user_property") {
+        return res.status(409).json({
+          message: "You have already sent an inquiry for this property",
+        });
+      }
 
-  console.error("Error creating inquiry:", err);
+      console.error("Error creating inquiry:", err);
 
-  res.status(500).json({
-    message: "Failed to create inquiry",
-    error: err.message,
-  });
-}
+      res.status(500).json({
+        message: "Failed to create inquiry",
+        error: err.message,
+      });
+    }
   }
 );
 
 // ==========================================================
 // SOCIETY ADMIN - GET INQUIRIES
 // ==========================================================
+// API:
+// GET /inquiries
+//
+// Society isolation:
+// - Society admin sees only inquiries mapped to their own society_id.
+// ==========================================================
+
 app.get(
   "/inquiries",
   authenticateToken,
@@ -2222,6 +2679,7 @@ app.get(
         `SELECT
            i.inquiry_id,
            i.property_id,
+           i.user_id,
            i.name,
            i.phone,
            i.inquiry_type,
@@ -2231,19 +2689,28 @@ app.get(
            i.visit_date,
            i.visit_time,
            i.notes,
+           i.mobile_verified,
+           i.mobile_verified_at,
            i.last_status_updated_at,
+           i.status_updated_by,
 
+           p.wing_flat_no,
+           p.floor_no,
            p.c_type,
            p.request_type,
            p.expected_price,
            p.expected_rent,
+           p.expected_deposit,
+           p.property_status,
 
            s.society_name,
            s.address AS society_address
 
          FROM inquiries i
-         JOIN properties p ON i.property_id = p.prop_id
-         LEFT JOIN societies s ON p.society_id = s.society_id
+         JOIN properties p
+           ON i.property_id = p.prop_id
+         LEFT JOIN societies s
+           ON p.society_id = s.society_id
          WHERE i.society_id = $1
          ORDER BY i.inquiry_id DESC`,
         [req.user.society_id]
@@ -2251,15 +2718,31 @@ app.get(
 
       res.json(result.rows);
     } catch (err) {
-      console.error(err);
-      res.status(500).json({ message: "Failed to fetch inquiries" });
+      console.error("Error fetching inquiries:", err);
+
+      res.status(500).json({
+        message: "Failed to fetch inquiries",
+        error: err.message,
+      });
     }
   }
 );
 
 // ==========================================================
-// UPDATE INQUIRY STATUS
+// SOCIETY ADMIN - UPDATE INQUIRY STATUS
 // ==========================================================
+// API:
+// PATCH /inquiry/:id
+//
+// Body example:
+// {
+//   "status": "visit_scheduled",
+//   "visit_date": "2026-05-10",
+//   "visit_time": "10:30",
+//   "notes": "Please contact society office before visit."
+// }
+// ==========================================================
+
 app.patch(
   "/inquiry/:id",
   authenticateToken,
@@ -2270,7 +2753,10 @@ app.patch(
       const { status, visit_date, visit_time, notes } = req.body;
 
       if (status && !ALLOWED_INQUIRY_STATUSES.includes(status)) {
-        return res.status(400).json({ message: "Invalid status" });
+        return res.status(400).json({
+          message:
+            "Invalid status. Allowed values: requested, contacted, visit_scheduled, visited, negotiation, deal_closed, cancelled, rejected",
+        });
       }
 
       const result = await pool.query(
@@ -2286,10 +2772,10 @@ app.patch(
            AND society_id = $7
          RETURNING *`,
         [
-          status,
-          visit_date,
-          visit_time,
-          notes,
+          status || null,
+          visit_date || null,
+          visit_time || null,
+          notes || null,
           req.user.user_id,
           id,
           req.user.society_id,
@@ -2298,30 +2784,34 @@ app.patch(
 
       if (result.rows.length === 0) {
         return res.status(404).json({
-          message: "Inquiry not found",
+          message: "Inquiry not found or unauthorized",
         });
       }
 
-      res.json(result.rows[0]);
+      res.json({
+        message: "Inquiry updated successfully",
+        inquiry: result.rows[0],
+      });
     } catch (err) {
-      console.error(err);
-      res.status(500).json({ message: "Update failed" });
+      console.error("Error updating inquiry:", err);
+
+      res.status(500).json({
+        message: "Failed to update inquiry",
+        error: err.message,
+      });
     }
   }
 );
+
 // ==========================================================
-// BUYER / TENANT - MY INQUIRIES API
+// BUYER / TENANT - MY INQUIRIES
 // ==========================================================
-// Purpose:
-// - Buyer/Tenant can view only their own inquiries
-// - Society admin / platform admin cannot access this API
-// - Existing GET /inquiries for society_admin remains unchanged
-//
 // API:
 // GET /my-inquiries
 //
-// Auth:
-// Authorization: Bearer <buyer_or_tenant_token>
+// Buyer data safety:
+// - Shows only inquiries for logged-in buyer/tenant.
+// - Does NOT expose wing_flat_no, owner_contact, admin_notes, bottom prices.
 // ==========================================================
 
 app.get(
@@ -2330,28 +2820,21 @@ app.get(
   authorizeRoles("buyer", "tenant"),
   async (req, res) => {
     try {
-      // ------------------------------------------------------
-      // req.user.user_id comes from JWT token after login.
-      // This ensures buyer/tenant can fetch only their own data.
-      // ------------------------------------------------------
-      const buyerUserId = req.user.user_id;
-
       const result = await pool.query(
         `SELECT
            i.inquiry_id,
            i.property_id,
+           i.inquiry_type,
            i.message,
            i.status,
            i.created_at,
            i.visit_date,
            i.visit_time,
-
-           -- Buyer-visible society admin note.
-           -- Keep this only if your product decision allows buyers
-           -- to see society-admin visit/update notes.
            i.notes,
+           i.mobile_verified,
+           i.mobile_verified_at,
+           i.last_status_updated_at,
 
-           -- Public property details
            p.c_type,
            p.request_type,
            p.expected_price,
@@ -2360,22 +2843,17 @@ app.get(
            p.property_status,
            p.available_from,
 
-           -- Public society details
            COALESCE(s.society_name, p.so_name) AS society_name,
            COALESCE(s.address, p.so_location) AS society_address
 
          FROM inquiries i
-
          LEFT JOIN properties p
            ON i.property_id = p.prop_id
-
          LEFT JOIN societies s
            ON p.society_id = s.society_id
-
          WHERE i.user_id = $1
-
          ORDER BY i.inquiry_id DESC`,
-        [buyerUserId]
+        [req.user.user_id]
       );
 
       res.json(result.rows);
