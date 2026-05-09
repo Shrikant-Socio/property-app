@@ -2057,6 +2057,286 @@ app.patch(
     }
   }
 );
+// ==========================================================
+// SOCIETY ADMIN INQUIRY MANAGEMENT APIs
+// ==========================================================
+
+const SOCIETY_ADMIN_INQUIRY_STATUSES = [
+  "requested",
+  "contacted",
+  "visit_scheduled",
+  "visited",
+  "negotiation",
+  "deal_closed",
+  "rejected",
+  "cancelled",
+];
+
+// ==========================================================
+// BUYER-VISIBLE PREDEFINED STATUS MESSAGES
+// ==========================================================
+// Society admin must select one of these messages while updating
+// inquiry status. This avoids unclear/blank buyer updates.
+// ==========================================================
+
+const BUYER_STATUS_MESSAGES = {
+  contacted: [
+    "Society admin has contacted you. Please check your phone.",
+    "We tried reaching you. Please call back when available.",
+  ],
+
+  visit_scheduled: [
+    "Your visit has been scheduled. Please arrive on time.",
+    "Your site visit is scheduled. Please coordinate with society admin.",
+  ],
+
+  visited: [
+    "Thank you for visiting the property. We will update you on next steps.",
+    "Your visit is completed. Please share your interest with society admin.",
+  ],
+
+  negotiation: [
+    "Your inquiry is under price discussion.",
+    "Society admin is coordinating with the owner for price discussion.",
+  ],
+
+  deal_closed: [
+    "Congratulations, this deal has been marked as closed.",
+    "Your deal is successfully closed. Society admin will guide you on next steps.",
+  ],
+
+  rejected: [
+    "This property is currently not available.",
+    "Your inquiry could not be processed at this time.",
+  ],
+
+  cancelled: [
+    "Your inquiry has been cancelled as per the current process.",
+    "This inquiry has been cancelled. Please contact society admin if needed.",
+  ],
+
+  requested: [
+    "Your inquiry has been received by society admin.",
+  ],
+};
+
+function isAllowedBuyerMessage(status, buyerMessage) {
+  if (!status || !buyerMessage) return false;
+
+  const allowedMessages = BUYER_STATUS_MESSAGES[status];
+
+  if (!Array.isArray(allowedMessages)) return false;
+
+  return allowedMessages.includes(String(buyerMessage).trim());
+}
+
+// ==========================================================
+// GET /society-inquiries
+// Society admin can view only inquiries for own society
+// ==========================================================
+
+app.get(
+  "/society-inquiries",
+  authenticateToken,
+  authorizeRoles("society_admin"),
+  async (req, res) => {
+    try {
+      const societyId = req.user.society_id;
+
+      if (!societyId) {
+        return res.status(403).json({
+          message: "Society admin is not mapped to any society",
+        });
+      }
+
+      const result = await pool.query(
+        `SELECT
+           i.inquiry_id,
+           i.property_id,
+           i.inquiry_type,
+           i.message,
+           i.status,
+           i.created_at,
+           i.visit_date,
+           i.visit_time,
+
+           -- Internal/admin operational note
+           i.notes,
+
+           -- Buyer-visible latest status explanation
+           i.buyer_message,
+
+           i.mobile_verified,
+           i.mobile_verified_at,
+           i.last_status_updated_at,
+
+           u.full_name AS buyer_name,
+           u.phone AS buyer_mobile,
+           u.email AS buyer_email,
+
+           p.c_type,
+           p.request_type,
+           p.expected_price,
+           p.expected_rent,
+           p.expected_deposit,
+           p.property_status,
+           p.available_from,
+
+           s.society_name,
+           s.address AS society_address
+
+         FROM inquiries i
+         JOIN properties p
+           ON i.property_id = p.prop_id
+         LEFT JOIN users u
+           ON i.user_id = u.user_id
+         LEFT JOIN societies s
+           ON p.society_id = s.society_id
+
+         WHERE p.society_id = $1
+           AND i.society_id = $1
+
+         ORDER BY i.created_at DESC, i.inquiry_id DESC`,
+        [societyId]
+      );
+
+      return res.status(200).json(result.rows);
+    } catch (err) {
+      console.error("Error fetching society inquiries:", err);
+
+      return res.status(500).json({
+        message: "Failed to fetch society inquiries",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// ==========================================================
+// PATCH /inquiries/:id/status
+// Society admin updates inquiry status with buyer-visible message
+// ==========================================================
+
+app.patch(
+  "/inquiries/:id/status",
+  authenticateToken,
+  authorizeRoles("society_admin"),
+  async (req, res) => {
+    try {
+      const societyId = req.user.society_id;
+      const inquiryId = Number(req.params.id);
+
+      const { status, buyer_message, visit_date, visit_time, notes } = req.body;
+
+      if (!societyId) {
+        return res.status(403).json({
+          message: "Society admin is not mapped to any society",
+        });
+      }
+
+      if (!Number.isInteger(inquiryId) || inquiryId <= 0) {
+        return res.status(400).json({
+          message: "Invalid inquiry id",
+        });
+      }
+
+      if (!status) {
+        return res.status(400).json({
+          message: "status is required",
+        });
+      }
+
+      if (!SOCIETY_ADMIN_INQUIRY_STATUSES.includes(status)) {
+        return res.status(400).json({
+          message:
+            "Invalid status. Allowed values: requested, contacted, visit_scheduled, visited, negotiation, deal_closed, rejected, cancelled",
+        });
+      }
+
+      if (!buyer_message || !String(buyer_message).trim()) {
+        return res.status(400).json({
+          message: "buyer_message is required for status update",
+        });
+      }
+
+      if (!isAllowedBuyerMessage(status, buyer_message)) {
+        return res.status(400).json({
+          message: "Invalid buyer_message for selected status",
+          allowed_messages: BUYER_STATUS_MESSAGES[status] || [],
+        });
+      }
+
+      if (status === "visit_scheduled" && (!visit_date || !visit_time)) {
+        return res.status(400).json({
+          message: "visit_date and visit_time are required when scheduling a visit",
+        });
+      }
+
+      const result = await pool.query(
+        `UPDATE inquiries i
+         SET
+           status = $1,
+           buyer_message = $2,
+           visit_date = COALESCE($3, i.visit_date),
+           visit_time = COALESCE($4, i.visit_time),
+           notes = COALESCE($5, i.notes),
+           last_status_updated_at = CURRENT_TIMESTAMP,
+           status_updated_by = $6
+         FROM properties p
+         WHERE i.property_id = p.prop_id
+           AND i.inquiry_id = $7
+           AND p.society_id = $8
+           AND i.society_id = $8
+         RETURNING
+           i.inquiry_id,
+           i.property_id,
+           i.user_id,
+           i.name AS buyer_name_snapshot,
+           i.phone AS buyer_mobile_snapshot,
+           i.inquiry_type,
+           i.message,
+           i.status,
+           i.buyer_message,
+           i.created_at,
+           i.visit_date,
+           i.visit_time,
+           i.notes,
+           i.mobile_verified,
+           i.mobile_verified_at,
+           i.last_status_updated_at,
+           i.status_updated_by`,
+        [
+          status,
+          String(buyer_message).trim(),
+          visit_date || null,
+          visit_time || null,
+          notes || null,
+          req.user.user_id,
+          inquiryId,
+          societyId,
+        ]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Inquiry not found or unauthorized",
+        });
+      }
+
+      return res.status(200).json({
+        message: "Inquiry status updated successfully",
+        inquiry: result.rows[0],
+      });
+    } catch (err) {
+      console.error("Error updating inquiry status:", err);
+
+      return res.status(500).json({
+        message: "Failed to update inquiry status",
+        error: err.message,
+      });
+    }
+  }
+);
 
 // ==========================================================
 // OTP + INQUIRY APIs - BUYER/TENANT VERIFIED MOBILE FLOW
@@ -2349,11 +2629,11 @@ app.post(
       }
 
       if (user.phone_verified === true) {
-        return res.status(200).json({
-          message: "Mobile number is already verified",
-          phone_verified: true,
-        });
-      }
+  return res.status(400).json({
+    message: "Mobile number is already verified. OTP verification is not required.",
+    phone_verified: true,
+  });
+}
 
       await client.query("BEGIN");
 
@@ -2827,6 +3107,7 @@ app.get(
            i.inquiry_type,
            i.message,
            i.status,
+           i.buyer_message,
            i.created_at,
            i.visit_date,
            i.visit_time,

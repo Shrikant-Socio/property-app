@@ -138,6 +138,9 @@ export default function MyInquiries() {
     if (normalized === 'visited') {
       return { ...baseStyle, background: '#ede9fe', color: '#6d28d9' };
     }
+    if (normalized === 'negotiation') {
+      return {...baseStyle, background: '#fef9c3', color: '#a16207' };
+   }
 
     if (normalized === 'deal_closed' || normalized === 'closed') {
       return { ...baseStyle, background: '#dcfce7', color: '#15803d' };
@@ -151,15 +154,34 @@ export default function MyInquiries() {
   };
 
   const getStatusStepIndex = (status) => {
-    const normalized = normalizeStatus(status);
+  const normalized = normalizeStatus(status);
 
-    if (normalized === 'contacted') return 1;
-    if (normalized === 'visit_scheduled') return 2;
-    if (normalized === 'visited') return 3;
-    if (normalized === 'deal_closed' || normalized === 'closed') return 4;
+  if (normalized === 'contacted') return 1;
 
-    return 0;
-  };
+  if (normalized === 'visit_scheduled') {
+    return 2;
+  }
+
+  if (normalized === 'visited') {
+    return 3;
+  }
+
+  // IMPORTANT:
+  // Negotiation happens AFTER visit.
+  // So buyer timeline should stay beyond visited.
+  if (normalized === 'negotiation') {
+    return 4;
+  }
+
+  if (
+    normalized === 'deal_closed' ||
+    normalized === 'closed'
+  ) {
+    return 5;
+  }
+
+  return 0;
+};
 
   const isUpcomingVisit = (inq) => {
     if (!inq.visit_date) return false;
@@ -187,7 +209,7 @@ export default function MyInquiries() {
   };
 
   const StatusTimeline = ({ status }) => {
-    const steps = ['Requested', 'Contacted', 'Visit', 'Visited', 'Closed'];
+    const steps = ['Requested', 'Contacted', 'Visit', 'Visited', 'Negotiation', 'Closed'];
     const activeIndex = getStatusStepIndex(status);
 
     return (
@@ -472,7 +494,7 @@ const styles = {
   },
   timelineWrapper: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(5, 1fr)',
+    gridTemplateColumns: 'repeat(6, 1fr)',
     gap: '4px'
   },
   timelineItem: {
