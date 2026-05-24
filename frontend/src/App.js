@@ -1,10 +1,18 @@
-// Import React Router components for navigation
+// ------------------------------------------------------------
+// App.js
+// ------------------------------------------------------------
+// SocioDeal Routing Configuration
+//
+// Purpose:
+// - Defines all frontend routes.
+// - Keeps role-based access protected.
+// - Adds /change-password route for forced password updates.
+// ------------------------------------------------------------
+
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
-// Import shared UI component
 import Navbar from './components/Navbar';
 
-// Import pages
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Properties from './pages/Properties';
@@ -19,8 +27,11 @@ import EditSociety from './pages/EditSociety';
 import SocietyDetails from './pages/SocietyDetails';
 import ManagePropertyImages from './pages/ManagePropertyImages';
 import MyInquiries from './pages/MyInquiries';
+import SocietyDashboard from './pages/SocietyDashboard';
+import PlatformDashboard from './pages/PlatformDashboard';
+import SocietyReminders from './pages/SocietyReminders';
+import ChangePassword from './pages/ChangePassword';
 
-// Import route protection component
 import ProtectedRoute from './components/ProtectedRoute';
 
 function App() {
@@ -38,7 +49,17 @@ function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
 
-        {/* Buyer route */}
+        {/* Authenticated password change route */}
+        <Route
+          path="/change-password"
+          element={
+            <ProtectedRoute>
+              <ChangePassword />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Buyer routes */}
         <Route
           path="/my-inquiries"
           element={
@@ -50,10 +71,28 @@ function App() {
 
         {/* Society admin routes */}
         <Route
+          path="/dashboard"
+          element={
+            <ProtectedRoute role="society_admin">
+              <SocietyDashboard />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
           path="/inquiries"
           element={
             <ProtectedRoute role="society_admin">
               <Inquiries />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/reminders"
+          element={
+            <ProtectedRoute role="society_admin">
+              <SocietyReminders />
             </ProtectedRoute>
           }
         />
@@ -95,6 +134,15 @@ function App() {
         />
 
         {/* Platform admin routes */}
+        <Route
+          path="/platform-dashboard"
+          element={
+            <ProtectedRoute role="platform_admin">
+              <PlatformDashboard />
+            </ProtectedRoute>
+          }
+        />
+
         <Route
           path="/societies"
           element={

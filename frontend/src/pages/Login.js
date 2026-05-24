@@ -1,4 +1,15 @@
-// Login page for all users: platform_admin, society_admin, buyer, tenant
+// ------------------------------------------------------------
+// Login.js
+// ------------------------------------------------------------
+// SocioDeal Login Page
+//
+// Purpose:
+// - Handles login for platform_admin, society_admin, buyer, tenant.
+// - Stores JWT token and user object.
+// - If backend returns user.force_password_change = true,
+//   redirects immediately to /change-password before any dashboard.
+// ------------------------------------------------------------
+
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import api from '../services/api';
@@ -6,48 +17,85 @@ import api from '../services/api';
 export default function Login() {
   const navigate = useNavigate();
 
-  // Form state for email/password
   const [formData, setFormData] = useState({
     email: '',
-    password: '',
+    password: ''
   });
 
-  // Message shown to user after login attempt
   const [message, setMessage] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
-  // Update form fields when user types
-  const handleChange = (e) => {
-    setFormData({
-      ...formData,
-      [e.target.name]: e.target.value,
-    });
+  // ------------------------------------------------------------
+  // Decide where user should go after normal login
+  // ------------------------------------------------------------
+  const getRedirectPath = (role) => {
+    const normalizedRole = String(role || '').trim().toLowerCase();
+
+    if (normalizedRole === 'platform_admin') return '/platform-dashboard';
+    if (normalizedRole === 'society_admin') return '/dashboard';
+
+    return '/properties';
   };
 
-  // Submit login request to backend
+  // ------------------------------------------------------------
+  // Update form state
+  // ------------------------------------------------------------
+  const handleChange = (e) => {
+    setFormData((current) => ({
+      ...current,
+      [e.target.name]: e.target.value
+    }));
+
+    setMessage('');
+  };
+
+  // ------------------------------------------------------------
+  // Login submit
+  // ------------------------------------------------------------
   const handleLogin = async (e) => {
     e.preventDefault();
 
     try {
+      setSubmitting(true);
+      setMessage('');
+
       const res = await api.post('/login', formData);
 
-      // Store token and user info in browser
-      localStorage.setItem('token', res.data.token);
-      localStorage.setItem('user', JSON.stringify(res.data.user));
+      const token = res.data?.token;
+      const user = res.data?.user;
 
-      setMessage('Login successful ✅');
-
-      // Redirect by role
-      if (res.data.user.role === 'platform_admin') {
-        navigate('/society-onboarding');
-      } else if (res.data.user.role === 'society_admin') {
-        navigate('/my-properties');
-      } else {
-        navigate('/properties');
+      if (!token || !user) {
+        setMessage('Invalid login response received from server.');
+        return;
       }
 
+      // Store token and user first so /change-password route can access token.
+      localStorage.setItem('token', token);
+      localStorage.setItem('user', JSON.stringify(user));
+
+      // --------------------------------------------------------
+      // HIGH PRIORITY SECURITY CHECK
+      // If platform admin reset password, backend sends:
+      // user.force_password_change = true
+      //
+      // User must be sent to /change-password immediately.
+      // --------------------------------------------------------
+      const forcePasswordChange =
+        user.force_password_change === true ||
+        user.force_password_change === 'true';
+
+      if (forcePasswordChange) {
+        navigate('/change-password', { replace: true });
+        return;
+      }
+
+      // Normal login redirect
+      navigate(getRedirectPath(user.role), { replace: true });
     } catch (error) {
       console.error('Login error:', error);
       setMessage(error.response?.data?.message || 'Login failed');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -77,8 +125,12 @@ export default function Login() {
             required
           />
 
-          <button className="btn btn-primary" type="submit">
-            Login
+          <button
+            className="btn btn-primary"
+            type="submit"
+            disabled={submitting}
+          >
+            {submitting ? 'Logging in...' : 'Login'}
           </button>
         </form>
 

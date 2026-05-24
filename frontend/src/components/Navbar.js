@@ -4,21 +4,8 @@
 // SocioDeal Navigation Bar
 //
 // Purpose:
-// - Show navigation links based on logged-in user role.
-// - Keep buyer/guest, society_admin, and platform_admin flows separate.
-//
-// Buyer / Guest:
-// - Properties
-// - My Inquiries only for logged-in buyer/tenant
-//
-// Society Admin:
-// - My Properties
-// - Add Property
-// - Inquiries
-//
-// Platform Admin:
-// - Societies
-// - Onboard Society
+// - Shows navigation links based on logged-in role.
+// - During forced password change, hides all navigation except brand/logout.
 // ------------------------------------------------------------
 
 import { Link, useNavigate } from 'react-router-dom';
@@ -44,14 +31,15 @@ export default function Navbar() {
   const isPlatformAdmin = role === 'platform_admin';
   const isBuyer = role === 'buyer';
   const isTenant = role === 'tenant';
-
   const isGuest = !isLoggedIn;
 
-  // Public marketplace should be visible only to guest / buyer / tenant
-  const canViewPublicProperties = isGuest || isBuyer || isTenant;
+  const mustChangePassword = user?.force_password_change === true;
 
-  // Buyer inquiry tracking should be visible only to buyer / tenant
-  const canViewMyInquiries = isLoggedIn && (isBuyer || isTenant);
+  const canViewPublicProperties =
+    !mustChangePassword && (isGuest || isBuyer || isTenant);
+
+  const canViewMyInquiries =
+    !mustChangePassword && isLoggedIn && (isBuyer || isTenant);
 
   const handleLogout = () => {
     localStorage.removeItem('token');
@@ -60,8 +48,9 @@ export default function Navbar() {
   };
 
   const getHomeRoute = () => {
-    if (isPlatformAdmin) return '/societies';
-    if (isSocietyAdmin) return '/my-properties';
+    if (mustChangePassword) return '/change-password';
+    if (isPlatformAdmin) return '/platform-dashboard';
+    if (isSocietyAdmin) return '/dashboard';
     return '/properties';
   };
 
@@ -98,54 +87,66 @@ export default function Navbar() {
           SocioDeal
         </Link>
 
+        {mustChangePassword && isLoggedIn && (
+          <span style={styles.noticeText}>
+            Password change required
+          </span>
+        )}
+
         {canViewPublicProperties && (
-          <Link
-            to="/properties"
-            style={{ color: '#d1d5db', textDecoration: 'none' }}
-          >
+          <Link to="/properties" style={styles.navLink}>
             Properties
           </Link>
         )}
 
         {canViewMyInquiries && (
-          <Link
-            to="/my-inquiries"
-            style={{ color: '#d1d5db', textDecoration: 'none' }}
-          >
+          <Link to="/my-inquiries" style={styles.navLink}>
             My Inquiries
           </Link>
         )}
 
-        {isSocietyAdmin && (
+        {!mustChangePassword && isSocietyAdmin && (
           <>
-            <Link to="/my-properties" style={{ color: '#d1d5db', textDecoration: 'none' }}>
+            <Link to="/dashboard" style={styles.navLink}>
+              Dashboard
+            </Link>
+
+            <Link to="/my-properties" style={styles.navLink}>
               My Properties
             </Link>
 
-            <Link to="/add-property" style={{ color: '#d1d5db', textDecoration: 'none' }}>
+            <Link to="/add-property" style={styles.navLink}>
               Add Property
             </Link>
 
-            <Link to="/inquiries" style={{ color: '#d1d5db', textDecoration: 'none' }}>
+            <Link to="/inquiries" style={styles.navLink}>
               Inquiries
+            </Link>
+
+            <Link to="/reminders" style={styles.navLink}>
+              Reminders
             </Link>
           </>
         )}
 
-        {isPlatformAdmin && (
+        {!mustChangePassword && isPlatformAdmin && (
           <>
-            <Link to="/societies" style={{ color: '#d1d5db', textDecoration: 'none' }}>
+            <Link to="/platform-dashboard" style={styles.navLink}>
+              Platform Dashboard
+            </Link>
+
+            <Link to="/societies" style={styles.navLink}>
               Societies
             </Link>
 
-            <Link to="/society-onboarding" style={{ color: '#d1d5db', textDecoration: 'none' }}>
+            <Link to="/society-onboarding" style={styles.navLink}>
               Onboard Society
             </Link>
           </>
         )}
 
         {!isLoggedIn && (
-          <Link to="/login" style={{ color: '#d1d5db', textDecoration: 'none' }}>
+          <Link to="/login" style={styles.navLink}>
             Login
           </Link>
         )}
@@ -169,3 +170,15 @@ export default function Navbar() {
     </div>
   );
 }
+
+const styles = {
+  navLink: {
+    color: '#d1d5db',
+    textDecoration: 'none'
+  },
+
+  noticeText: {
+    color: '#fde68a',
+    fontWeight: '800'
+  }
+};

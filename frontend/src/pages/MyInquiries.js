@@ -6,14 +6,15 @@
 // Purpose:
 // - Buyer / tenant can view their own submitted inquiries.
 // - Uses backend API: GET /my-inquiries
+// - New enhancement: buyer can view inquiry status timeline.
 //
-// Mobile-first features:
-// 1. Card UI
-// 2. Status badge
-// 3. Status timeline
-// 4. Upcoming visit highlight
-// 5. View Property button
-// 6. Latest inquiries first
+// Timeline API:
+// - GET /inquiries/:id/timeline
+//
+// Buyer privacy:
+// - Buyer must NOT see internal_note.
+// - Buyer must NOT see changed_by_name.
+// - Buyer only sees buyer-safe status history and buyer_message.
 // ------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from 'react';
@@ -23,6 +24,15 @@ import api from '../services/api';
 export default function MyInquiries() {
   const [inquiries, setInquiries] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  // Timeline modal states
+  const [timelineModal, setTimelineModal] = useState({
+    open: false,
+    inquiry: null,
+    loading: false,
+    error: '',
+    items: []
+  });
 
   const navigate = useNavigate();
   const token = localStorage.getItem('token');
@@ -112,6 +122,10 @@ export default function MyInquiries() {
     return String(status || 'requested').toLowerCase();
   };
 
+  const formatStatusLabel = (status) => {
+    return normalizeStatus(status).replaceAll('_', ' ');
+  };
+
   const getStatusStyle = (status) => {
     const normalized = normalizeStatus(status);
 
@@ -138,50 +152,40 @@ export default function MyInquiries() {
     if (normalized === 'visited') {
       return { ...baseStyle, background: '#ede9fe', color: '#6d28d9' };
     }
+
     if (normalized === 'negotiation') {
-      return {...baseStyle, background: '#fef9c3', color: '#a16207' };
-   }
+      return { ...baseStyle, background: '#fef9c3', color: '#a16207' };
+    }
 
     if (normalized === 'deal_closed' || normalized === 'closed') {
       return { ...baseStyle, background: '#dcfce7', color: '#15803d' };
     }
 
+    if (normalized === 'rejected') {
+      return { ...baseStyle, background: '#fee2e2', color: '#b91c1c' };
+    }
+
+    if (normalized === 'cancelled') {
+      return { ...baseStyle, background: '#7f1d1d', color: '#ffffff' };
+    }
+
     return { ...baseStyle, background: '#e5e7eb', color: '#374151' };
   };
 
-  const formatStatusLabel = (status) => {
-    return normalizeStatus(status).replaceAll('_', ' ');
-  };
-
   const getStatusStepIndex = (status) => {
-  const normalized = normalizeStatus(status);
+    const normalized = normalizeStatus(status);
 
-  if (normalized === 'contacted') return 1;
+    if (normalized === 'contacted') return 1;
+    if (normalized === 'visit_scheduled') return 2;
+    if (normalized === 'visited') return 3;
+    if (normalized === 'negotiation') return 4;
 
-  if (normalized === 'visit_scheduled') {
-    return 2;
-  }
+    if (normalized === 'deal_closed' || normalized === 'closed') {
+      return 5;
+    }
 
-  if (normalized === 'visited') {
-    return 3;
-  }
-
-  // IMPORTANT:
-  // Negotiation happens AFTER visit.
-  // So buyer timeline should stay beyond visited.
-  if (normalized === 'negotiation') {
-    return 4;
-  }
-
-  if (
-    normalized === 'deal_closed' ||
-    normalized === 'closed'
-  ) {
-    return 5;
-  }
-
-  return 0;
-};
+    return 0;
+  };
 
   const isUpcomingVisit = (inq) => {
     if (!inq.visit_date) return false;
@@ -206,6 +210,61 @@ export default function MyInquiries() {
     }
 
     navigate(`/properties/${propertyId}`);
+  };
+
+  // ------------------------------------------------------------
+  // Lazy-load buyer-safe timeline only when user clicks.
+  // ------------------------------------------------------------
+  const openTimelineModal = async (inquiry) => {
+    setTimelineModal({
+      open: true,
+      inquiry,
+      loading: true,
+      error: '',
+      items: []
+    });
+
+    try {
+      const res = await api.get(`/inquiries/${inquiry.inquiry_id}/timeline`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      const timeline = Array.isArray(res.data)
+        ? res.data
+        : res.data?.data || res.data?.timeline || [];
+
+      setTimelineModal({
+        open: true,
+        inquiry,
+        loading: false,
+        error: '',
+        items: timeline
+      });
+    } catch (error) {
+      console.error('Error fetching inquiry timeline:', error);
+
+      setTimelineModal({
+        open: true,
+        inquiry,
+        loading: false,
+        error:
+          error.response?.data?.message ||
+          'Failed to load inquiry timeline.',
+        items: []
+      });
+    }
+  };
+
+  const closeTimelineModal = () => {
+    setTimelineModal({
+      open: false,
+      inquiry: null,
+      loading: false,
+      error: '',
+      items: []
+    });
   };
 
   const StatusTimeline = ({ status }) => {
@@ -335,6 +394,13 @@ export default function MyInquiries() {
                   <StatusTimeline status={inq.status} />
                 </div>
 
+                {inq.buyer_message && (
+                  <div style={styles.buyerMessageBox}>
+                    <p style={styles.label}>Latest Update</p>
+                    <p style={styles.message}>{inq.buyer_message}</p>
+                  </div>
+                )}
+
                 <div style={styles.section}>
                   <p style={styles.label}>Your Message</p>
                   <p style={styles.message}>
@@ -349,13 +415,23 @@ export default function MyInquiries() {
                   </div>
                 )}
 
-                <button
-                  type="button"
-                  style={styles.viewButton}
-                  onClick={() => handleViewProperty(inq.property_id)}
-                >
-                  View Property
-                </button>
+                <div style={styles.buttonGrid}>
+  <button
+    type="button"
+    style={styles.viewButton}
+    onClick={() => handleViewProperty(inq.property_id)}
+  >
+    View Property
+  </button>
+
+  <button
+    type="button"
+    style={styles.timelineButton}
+    onClick={() => openTimelineModal(inq)}
+  >
+    View Timeline
+  </button>
+</div>
 
                 <p style={styles.createdAt}>
                   Inquiry sent: {formatDateTime(inq.created_at)}
@@ -363,6 +439,77 @@ export default function MyInquiries() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {timelineModal.open && (
+        <div style={styles.modalBackdrop}>
+          <div style={styles.modalCard}>
+            <div style={styles.modalHeader}>
+              <div>
+                <h3 style={styles.modalTitle}>Inquiry Timeline</h3>
+                <p style={styles.modalSubtitle}>
+                  Inquiry #{timelineModal.inquiry?.inquiry_id}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                style={styles.modalCloseButton}
+                onClick={closeTimelineModal}
+              >
+                ×
+              </button>
+            </div>
+
+            {timelineModal.loading ? (
+              <p style={styles.modalInfoText}>Loading timeline...</p>
+            ) : timelineModal.error ? (
+              <div style={styles.errorBox}>{timelineModal.error}</div>
+            ) : timelineModal.items.length === 0 ? (
+              <p style={styles.modalInfoText}>No timeline history found.</p>
+            ) : (
+              <div style={styles.verticalTimeline}>
+                {timelineModal.items.map((item) => (
+                  <div key={item.history_id} style={styles.verticalTimelineItem}>
+                    <div style={styles.verticalDot}>✓</div>
+
+                    <div style={styles.verticalContent}>
+                      <p style={styles.timelineStatusTitle}>
+                        {formatStatusLabel(item.old_status)} → {formatStatusLabel(item.new_status)}
+                      </p>
+
+                      <p style={styles.timelineDate}>
+                        {formatDateTime(item.changed_at)}
+                      </p>
+
+                      {item.buyer_message && (
+                        <p style={styles.timelineMessage}>
+                          {item.buyer_message}
+                        </p>
+                      )}
+
+                      {(item.visit_date || item.visit_time) && (
+                        <div style={styles.timelineVisitBox}>
+                          {item.visit_date && (
+                            <p>
+                              <b>Visit Date:</b> {formatDate(item.visit_date)}
+                            </p>
+                          )}
+
+                          {item.visit_time && (
+                            <p>
+                              <b>Visit Time:</b> {formatTime(item.visit_time)}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -485,6 +632,13 @@ const styles = {
     lineHeight: '1.5',
     color: '#374151'
   },
+  buyerMessageBox: {
+    marginTop: '14px',
+    background: '#eff6ff',
+    border: '1px solid #bfdbfe',
+    borderRadius: '14px',
+    padding: '12px'
+  },
   buyerNoteBox: {
     marginTop: '14px',
     background: '#f8fafc',
@@ -540,6 +694,12 @@ const styles = {
   timelineTextActive: {
     color: '#1f2937'
   },
+  buttonGrid: {
+    display: 'grid',
+    gridTemplateColumns: '1fr',
+    gap: '10px',
+    marginTop: '16px'
+  },
   viewButton: {
     width: '100%',
     border: 'none',
@@ -549,8 +709,18 @@ const styles = {
     color: '#fff',
     fontSize: '15px',
     fontWeight: '900',
-    cursor: 'pointer',
-    marginTop: '16px'
+    cursor: 'pointer'
+  },
+  timelineButton: {
+    width: '100%',
+    border: '1px solid #d1d5db',
+    borderRadius: '14px',
+    padding: '12px 14px',
+    background: '#ffffff',
+    color: '#111827',
+    fontSize: '15px',
+    fontWeight: '900',
+    cursor: 'pointer'
   },
   createdAt: {
     margin: '12px 0 0',
@@ -574,5 +744,113 @@ const styles = {
     margin: 0,
     color: '#6b7280',
     lineHeight: '1.5'
+  },
+  modalBackdrop: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0,0,0,0.55)',
+    zIndex: 9999,
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: '16px'
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: '520px',
+    maxHeight: '90vh',
+    overflowY: 'auto',
+    background: '#ffffff',
+    borderRadius: '18px',
+    padding: '18px',
+    boxShadow: '0 20px 50px rgba(0,0,0,0.25)'
+  },
+  modalHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: '12px',
+    alignItems: 'flex-start',
+    marginBottom: '14px'
+  },
+  modalTitle: {
+    margin: 0,
+    fontSize: '21px'
+  },
+  modalSubtitle: {
+    margin: '4px 0 0',
+    color: '#6b7280',
+    fontSize: '13px'
+  },
+  modalCloseButton: {
+    width: '34px',
+    height: '34px',
+    borderRadius: '999px',
+    border: 'none',
+    background: '#111827',
+    color: '#ffffff',
+    fontSize: '20px',
+    cursor: 'pointer'
+  },
+  modalInfoText: {
+    color: '#374151',
+    margin: 0
+  },
+  errorBox: {
+    background: '#fee2e2',
+    border: '1px solid #fecaca',
+    color: '#991b1b',
+    padding: '12px',
+    borderRadius: '12px',
+    fontWeight: '800'
+  },
+  verticalTimeline: {
+    display: 'grid',
+    gap: '14px'
+  },
+  verticalTimelineItem: {
+    display: 'grid',
+    gridTemplateColumns: '32px 1fr',
+    gap: '10px'
+  },
+  verticalDot: {
+    width: '28px',
+    height: '28px',
+    borderRadius: '999px',
+    background: '#2563eb',
+    color: '#ffffff',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontWeight: '900',
+    marginTop: '2px'
+  },
+  verticalContent: {
+    borderLeft: '2px solid #e5e7eb',
+    paddingLeft: '12px',
+    paddingBottom: '8px'
+  },
+  timelineStatusTitle: {
+    margin: 0,
+    fontWeight: '900',
+    color: '#111827',
+    textTransform: 'capitalize'
+  },
+  timelineDate: {
+    margin: '4px 0 8px',
+    color: '#6b7280',
+    fontSize: '13px'
+  },
+  timelineMessage: {
+    margin: 0,
+    color: '#374151',
+    lineHeight: '1.5'
+  },
+  timelineVisitBox: {
+    marginTop: '10px',
+    background: '#fff7ed',
+    border: '1px solid #fed7aa',
+    borderRadius: '12px',
+    padding: '10px',
+    color: '#7c2d12'
   }
 };

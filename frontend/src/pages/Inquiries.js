@@ -8,42 +8,32 @@
 // - Uses backend APIs:
 //   1. GET /society-inquiries
 //   2. PATCH /inquiries/:id/status
+//   3. GET /inquiries/:id/timeline
 //
-// Latest enhancement:
-// - Backend now requires buyer_message for every status update.
-// - Admin must select predefined buyer-visible message before update.
-// - Internal notes are optional.
-// - Visit date/time are required only for visit_scheduled.
+// Timeline enhancement:
+// - Admin can open CRM-style timeline for each inquiry.
+// - Admin can see internal_note, buyer_message, changed_by_name,
+//   visit date/time, and status changes.
 //
 // Important:
 // - Buyer UI remains unchanged.
-// - This page is already protected in App.js for society_admin.
-// - Backend enforces multi-society isolation.
+// - Status update modal remains unchanged.
+// - Backend enforces society isolation.
 // ------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from 'react';
 import api from '../services/api';
 
 export default function Inquiries() {
-  // ------------------------------------------------------------
-  // Main page states
-  // ------------------------------------------------------------
   const [inquiries, setInquiries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
 
-  // ------------------------------------------------------------
-  // Action states
-  // ------------------------------------------------------------
   const [updating, setUpdating] = useState(false);
   const [actionMessage, setActionMessage] = useState('');
   const [actionMessageType, setActionMessageType] = useState('');
 
-  // ------------------------------------------------------------
-  // Single action modal state
-  // This modal is used for all status updates.
-  // ------------------------------------------------------------
   const [actionModal, setActionModal] = useState({
     open: false,
     inquiry: null,
@@ -55,11 +45,17 @@ export default function Inquiries() {
     visit_time: ''
   });
 
+  // Timeline modal state
+  const [timelineModal, setTimelineModal] = useState({
+    open: false,
+    inquiry: null,
+    loading: false,
+    error: '',
+    items: []
+  });
+
   const token = localStorage.getItem('token');
 
-  // ------------------------------------------------------------
-  // Status options supported by backend
-  // ------------------------------------------------------------
   const STATUS_OPTIONS = [
     { value: 'requested', label: 'Requested' },
     { value: 'contacted', label: 'Contacted' },
@@ -71,14 +67,8 @@ export default function Inquiries() {
     { value: 'cancelled', label: 'Cancelled' }
   ];
 
-  // ------------------------------------------------------------
-  // Predefined buyer-visible messages
-  // These values must exactly match backend allowed messages.
-  // ------------------------------------------------------------
   const BUYER_MESSAGES = {
-    requested: [
-      'Your inquiry has been received by society admin.'
-    ],
+    requested: ['Your inquiry has been received by society admin.'],
     contacted: [
       'Society admin has contacted you. Please check your phone.',
       'We tried reaching you. Please call back when available.'
@@ -109,9 +99,6 @@ export default function Inquiries() {
     ]
   };
 
-  // ------------------------------------------------------------
-  // Quick actions shown on each inquiry card
-  // ------------------------------------------------------------
   const QUICK_ACTIONS = [
     { status: 'contacted', label: 'Contacted' },
     { status: 'visit_scheduled', label: 'Schedule Visit' },
@@ -127,10 +114,6 @@ export default function Inquiries() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ------------------------------------------------------------
-  // Fetch society inquiries
-  // Backend returns only inquiries for logged-in society admin society.
-  // ------------------------------------------------------------
   const fetchSocietyInquiries = async () => {
     try {
       setLoading(true);
@@ -160,9 +143,6 @@ export default function Inquiries() {
     }
   };
 
-  // ------------------------------------------------------------
-  // Helpers
-  // ------------------------------------------------------------
   const normalizeStatus = (status) => {
     return String(status || 'requested').trim().toLowerCase();
   };
@@ -229,9 +209,6 @@ export default function Inquiries() {
       : 'Price on request';
   };
 
-  // ------------------------------------------------------------
-  // Status badge colors
-  // ------------------------------------------------------------
   const getStatusBadgeStyle = (status) => {
     const normalized = normalizeStatus(status);
 
@@ -247,44 +224,18 @@ export default function Inquiries() {
       whiteSpace: 'nowrap'
     };
 
-    if (normalized === 'requested') {
-      return { ...base, background: '#e5e7eb', color: '#374151' };
-    }
-
-    if (normalized === 'contacted') {
-      return { ...base, background: '#dbeafe', color: '#1d4ed8' };
-    }
-
-    if (normalized === 'visit_scheduled') {
-      return { ...base, background: '#ffedd5', color: '#c2410c' };
-    }
-
-    if (normalized === 'visited') {
-      return { ...base, background: '#ede9fe', color: '#6d28d9' };
-    }
-
-    if (normalized === 'negotiation') {
-      return { ...base, background: '#fef9c3', color: '#a16207' };
-    }
-
-    if (normalized === 'deal_closed') {
-      return { ...base, background: '#dcfce7', color: '#15803d' };
-    }
-
-    if (normalized === 'rejected') {
-      return { ...base, background: '#fee2e2', color: '#b91c1c' };
-    }
-
-    if (normalized === 'cancelled') {
-      return { ...base, background: '#7f1d1d', color: '#ffffff' };
-    }
+    if (normalized === 'requested') return { ...base, background: '#e5e7eb', color: '#374151' };
+    if (normalized === 'contacted') return { ...base, background: '#dbeafe', color: '#1d4ed8' };
+    if (normalized === 'visit_scheduled') return { ...base, background: '#ffedd5', color: '#c2410c' };
+    if (normalized === 'visited') return { ...base, background: '#ede9fe', color: '#6d28d9' };
+    if (normalized === 'negotiation') return { ...base, background: '#fef9c3', color: '#a16207' };
+    if (normalized === 'deal_closed') return { ...base, background: '#dcfce7', color: '#15803d' };
+    if (normalized === 'rejected') return { ...base, background: '#fee2e2', color: '#b91c1c' };
+    if (normalized === 'cancelled') return { ...base, background: '#7f1d1d', color: '#ffffff' };
 
     return { ...base, background: '#e5e7eb', color: '#374151' };
   };
 
-  // ------------------------------------------------------------
-  // Filter and sort inquiries
-  // ------------------------------------------------------------
   const filteredInquiries = useMemo(() => {
     const sorted = [...inquiries].sort((a, b) => {
       return new Date(b.created_at || 0) - new Date(a.created_at || 0);
@@ -295,9 +246,6 @@ export default function Inquiries() {
     return sorted.filter((inq) => normalizeStatus(inq.status) === statusFilter);
   }, [inquiries, statusFilter]);
 
-  // ------------------------------------------------------------
-  // Dashboard stats
-  // ------------------------------------------------------------
   const stats = useMemo(() => {
     return {
       total: inquiries.length,
@@ -309,9 +257,6 @@ export default function Inquiries() {
     };
   }, [inquiries]);
 
-  // ------------------------------------------------------------
-  // Open action modal for any status action
-  // ------------------------------------------------------------
   const openActionModal = (inquiry, action) => {
     const messages = BUYER_MESSAGES[action.status] || [];
 
@@ -330,9 +275,6 @@ export default function Inquiries() {
     setActionMessageType('');
   };
 
-  // ------------------------------------------------------------
-  // Close action modal
-  // ------------------------------------------------------------
   const closeActionModal = () => {
     setActionModal({
       open: false,
@@ -346,10 +288,6 @@ export default function Inquiries() {
     });
   };
 
-  // ------------------------------------------------------------
-  // Submit status update
-  // Sends buyer_message as mandatory field.
-  // ------------------------------------------------------------
   const handleSubmitStatusUpdate = async () => {
     if (!actionModal.inquiry) return;
 
@@ -413,7 +351,6 @@ export default function Inquiries() {
       setActionMessageType('success');
       setActionMessage('Inquiry status updated successfully.');
 
-      // Refresh list so admin sees latest backend data.
       await fetchSocietyInquiries();
     } catch (error) {
       console.error('Error updating inquiry:', error);
@@ -429,8 +366,60 @@ export default function Inquiries() {
   };
 
   // ------------------------------------------------------------
-  // Loading state
+  // Lazy-load admin timeline only on click.
   // ------------------------------------------------------------
+  const openTimelineModal = async (inquiry) => {
+    setTimelineModal({
+      open: true,
+      inquiry,
+      loading: true,
+      error: '',
+      items: []
+    });
+
+    try {
+      const res = await api.get(`/inquiries/${inquiry.inquiry_id}/timeline`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      const timeline = Array.isArray(res.data)
+        ? res.data
+        : res.data?.data || res.data?.timeline || [];
+
+      setTimelineModal({
+        open: true,
+        inquiry,
+        loading: false,
+        error: '',
+        items: timeline
+      });
+    } catch (error) {
+      console.error('Error fetching inquiry timeline:', error);
+
+      setTimelineModal({
+        open: true,
+        inquiry,
+        loading: false,
+        error:
+          error.response?.data?.message ||
+          'Failed to load inquiry timeline.',
+        items: []
+      });
+    }
+  };
+
+  const closeTimelineModal = () => {
+    setTimelineModal({
+      open: false,
+      inquiry: null,
+      loading: false,
+      error: '',
+      items: []
+    });
+  };
+
   if (loading) {
     return (
       <div className="page-container">
@@ -469,9 +458,6 @@ export default function Inquiries() {
         </div>
       )}
 
-      {/* --------------------------------------------------------
-          Stats cards
-      -------------------------------------------------------- */}
       <div style={styles.statsGrid}>
         <div style={styles.statCard}>
           <span style={styles.statLabel}>Total</span>
@@ -504,9 +490,6 @@ export default function Inquiries() {
         </div>
       </div>
 
-      {/* --------------------------------------------------------
-          Filter
-      -------------------------------------------------------- */}
       <div className="card">
         <label style={styles.label}>Filter by Status</label>
 
@@ -525,9 +508,6 @@ export default function Inquiries() {
         </select>
       </div>
 
-      {/* --------------------------------------------------------
-          Inquiry cards
-      -------------------------------------------------------- */}
       {filteredInquiries.length === 0 ? (
         <div style={styles.emptyCard}>
           <h3>No inquiries found</h3>
@@ -659,6 +639,14 @@ export default function Inquiries() {
                         </button>
                       );
                     })}
+
+                    <button
+                      type="button"
+                      style={styles.timelineActionButton}
+                      onClick={() => openTimelineModal(inq)}
+                    >
+                      Timeline
+                    </button>
                   </div>
                 </div>
               </article>
@@ -667,9 +655,6 @@ export default function Inquiries() {
         </div>
       )}
 
-      {/* --------------------------------------------------------
-          Status update modal
-      -------------------------------------------------------- */}
       {actionModal.open && (
         <div style={styles.modalBackdrop}>
           <div style={styles.modalCard}>
@@ -769,13 +754,95 @@ export default function Inquiries() {
           </div>
         </div>
       )}
+
+      {timelineModal.open && (
+        <div style={styles.modalBackdrop}>
+          <div style={styles.modalCard}>
+            <div style={styles.modalHeader}>
+              <div>
+                <h3 style={styles.modalTitle}>Inquiry Timeline</h3>
+                <p style={styles.modalSubtitle}>
+                  Inquiry #{timelineModal.inquiry?.inquiry_id}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                style={styles.modalCloseButton}
+                onClick={closeTimelineModal}
+              >
+                ×
+              </button>
+            </div>
+
+            {timelineModal.loading ? (
+              <p style={styles.modalText}>Loading timeline...</p>
+            ) : timelineModal.error ? (
+              <div style={{ ...styles.messageBox, ...styles.errorBox }}>
+                {timelineModal.error}
+              </div>
+            ) : timelineModal.items.length === 0 ? (
+              <p style={styles.modalText}>No timeline history found.</p>
+            ) : (
+              <div style={styles.verticalTimeline}>
+                {timelineModal.items.map((item) => (
+                  <div key={item.history_id} style={styles.verticalTimelineItem}>
+                    <div style={styles.verticalDot}>✓</div>
+
+                    <div style={styles.verticalContent}>
+                      <p style={styles.timelineStatusTitle}>
+                        {getStatusLabel(item.old_status)} → {getStatusLabel(item.new_status)}
+                      </p>
+
+                      <p style={styles.timelineDate}>
+                        {formatDateTime(item.changed_at)}
+                      </p>
+
+                      {item.changed_by_name && (
+                        <p style={styles.timelineMeta}>
+                          <b>Changed By:</b> {item.changed_by_name}
+                        </p>
+                      )}
+
+                      {item.buyer_message && (
+                        <p style={styles.timelineMessage}>
+                          <b>Buyer Message:</b> {item.buyer_message}
+                        </p>
+                      )}
+
+                      {item.internal_note && (
+                        <p style={styles.timelineMessage}>
+                          <b>Internal Note:</b> {item.internal_note}
+                        </p>
+                      )}
+
+                      {(item.visit_date || item.visit_time) && (
+                        <div style={styles.timelineVisitBox}>
+                          {item.visit_date && (
+                            <p>
+                              <b>Visit Date:</b> {formatDate(item.visit_date)}
+                            </p>
+                          )}
+
+                          {item.visit_time && (
+                            <p>
+                              <b>Visit Time:</b> {formatTime(item.visit_time)}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-// ------------------------------------------------------------
-// Local styles
-// ------------------------------------------------------------
 const styles = {
   headerBlock: {
     marginBottom: '18px'
@@ -960,6 +1027,17 @@ const styles = {
     cursor: 'not-allowed'
   },
 
+  timelineActionButton: {
+    border: 'none',
+    background: '#111827',
+    color: '#ffffff',
+    padding: '10px 12px',
+    borderRadius: '12px',
+    fontSize: '13px',
+    fontWeight: '900',
+    cursor: 'pointer'
+  },
+
   modalBackdrop: {
     position: 'fixed',
     inset: 0,
@@ -973,7 +1051,7 @@ const styles = {
 
   modalCard: {
     width: '100%',
-    maxWidth: '520px',
+    maxWidth: '540px',
     maxHeight: '90vh',
     overflowY: 'auto',
     background: '#ffffff',
@@ -982,9 +1060,34 @@ const styles = {
     boxShadow: '0 20px 50px rgba(0,0,0,0.25)'
   },
 
+  modalHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    gap: '12px',
+    alignItems: 'flex-start',
+    marginBottom: '14px'
+  },
+
   modalTitle: {
     margin: '0 0 8px',
     fontSize: '21px'
+  },
+
+  modalSubtitle: {
+    margin: '4px 0 0',
+    color: '#6b7280',
+    fontSize: '13px'
+  },
+
+  modalCloseButton: {
+    width: '34px',
+    height: '34px',
+    borderRadius: '999px',
+    border: 'none',
+    background: '#111827',
+    color: '#ffffff',
+    fontSize: '20px',
+    cursor: 'pointer'
   },
 
   modalText: {
@@ -1037,5 +1140,68 @@ const styles = {
     borderRadius: '12px',
     fontWeight: '900',
     cursor: 'pointer'
+  },
+
+  verticalTimeline: {
+    display: 'grid',
+    gap: '14px'
+  },
+
+  verticalTimelineItem: {
+    display: 'grid',
+    gridTemplateColumns: '32px 1fr',
+    gap: '10px'
+  },
+
+  verticalDot: {
+    width: '28px',
+    height: '28px',
+    borderRadius: '999px',
+    background: '#2563eb',
+    color: '#ffffff',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontWeight: '900',
+    marginTop: '2px'
+  },
+
+  verticalContent: {
+    borderLeft: '2px solid #e5e7eb',
+    paddingLeft: '12px',
+    paddingBottom: '8px'
+  },
+
+  timelineStatusTitle: {
+    margin: 0,
+    fontWeight: '900',
+    color: '#111827'
+  },
+
+  timelineDate: {
+    margin: '4px 0 8px',
+    color: '#6b7280',
+    fontSize: '13px'
+  },
+
+  timelineMeta: {
+    margin: '0 0 6px',
+    color: '#374151',
+    lineHeight: '1.5'
+  },
+
+  timelineMessage: {
+    margin: '0 0 8px',
+    color: '#374151',
+    lineHeight: '1.5'
+  },
+
+  timelineVisitBox: {
+    marginTop: '10px',
+    background: '#fff7ed',
+    border: '1px solid #fed7aa',
+    borderRadius: '12px',
+    padding: '10px',
+    color: '#7c2d12'
   }
 };

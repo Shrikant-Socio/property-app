@@ -207,10 +207,39 @@ if (err.code === "23505") {
   }
 });
 
+// ==========================================================
+// LOGIN API - HARDENED VERSION
+// ==========================================================
+// Enhancements:
+// - Blocks inactive accounts
+// - Blocks blocked accounts
+// - Tracks failed login attempts
+// - Blocks account after 5 failed attempts
+// - Resets failed_login_attempts on successful login
+// - Updates last_login_at on successful login
+// - Returns force_password_change flag for frontend redirect
+// - Keeps existing JWT payload backward-compatible
+// ==========================================================
+
 app.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    // ------------------------------------------------------
+    // Basic validation
+    // ------------------------------------------------------
+    if (!email || !password) {
+      return res.status(400).json({
+        message: "Email and password are required",
+      });
+    }
+
+    // ------------------------------------------------------
+    // Fetch user by email.
+    // SELECT * is kept for backward compatibility with your
+    // current login logic, because token/user response uses
+    // multiple fields.
+    // ------------------------------------------------------
     const userResult = await pool.query(
       `SELECT *
        FROM users
@@ -219,18 +248,76 @@ app.post("/login", async (req, res) => {
     );
 
     if (userResult.rows.length === 0) {
-      return res.status(401).json({ message: "Invalid email or password" });
+      return res.status(401).json({
+        message: "Invalid email or password",
+      });
     }
 
     const user = userResult.rows[0];
 
+    // ------------------------------------------------------
+    // Account status check before password validation.
+    // This prevents inactive/blocked users from logging in.
+    // NULL is treated as active for backward compatibility.
+    // ------------------------------------------------------
+    const accountStatus = user.account_status || "active";
+
+    if (accountStatus === "inactive") {
+      return res.status(403).json({
+        message: "Your account is inactive. Contact administrator.",
+      });
+    }
+
+    if (accountStatus === "blocked") {
+      return res.status(403).json({
+        message: "Your account is blocked. Contact support.",
+      });
+    }
+
+    // ------------------------------------------------------
+    // Password validation using bcrypt.
+    // Never expose or return password/hash.
+    // ------------------------------------------------------
     const validPassword = await bcrypt.compare(password, user.password);
 
     if (!validPassword) {
-      return res.status(401).json({ message: "Invalid email or password" });
+      const currentFailedAttempts = Number(user.failed_login_attempts || 0);
+      const newFailedAttempts = currentFailedAttempts + 1;
+
+      // Optional lock rule:
+      // After 5 wrong attempts, block account.
+      if (newFailedAttempts >= 5) {
+        await pool.query(
+          `UPDATE users
+           SET failed_login_attempts = $1,
+               account_status = 'blocked'
+           WHERE user_id = $2`,
+          [newFailedAttempts, user.user_id]
+        );
+
+        return res.status(403).json({
+          message:
+            "Your account is blocked due to multiple failed login attempts. Contact support.",
+        });
+      }
+
+      await pool.query(
+        `UPDATE users
+         SET failed_login_attempts = $1
+         WHERE user_id = $2`,
+        [newFailedAttempts, user.user_id]
+      );
+
+      return res.status(401).json({
+        message: "Invalid email or password",
+        attempts_remaining: Math.max(0, 5 - newFailedAttempts),
+      });
     }
 
-    // Block society admin if mapped society is missing/inactive
+    // ------------------------------------------------------
+    // Block society admin if mapped society is missing/inactive.
+    // Existing behavior preserved.
+    // ------------------------------------------------------
     if (user.role === "society_admin") {
       const societyResult = await pool.query(
         `SELECT society_id, status
@@ -253,35 +340,173 @@ app.post("/login", async (req, res) => {
       }
     }
 
+    // ------------------------------------------------------
+    // Successful login:
+    // - reset failed attempts
+    // - update last_login_at
+    // - fetch updated values for clean response
+    // ------------------------------------------------------
+    const updatedUserResult = await pool.query(
+      `UPDATE users
+       SET failed_login_attempts = 0,
+           last_login_at = CURRENT_TIMESTAMP
+       WHERE user_id = $1
+       RETURNING *`,
+      [user.user_id]
+    );
+
+    const updatedUser = updatedUserResult.rows[0];
+
+    // ------------------------------------------------------
+    // JWT payload remains backward-compatible.
+    // Added force_password_change/account_status for frontend use.
+    // ------------------------------------------------------
     const token = jwt.sign(
       {
-        user_id: user.user_id,
-        email: user.email,
-        role: user.role,
-        society_id: user.society_id,
-        phone_verified: user.phone_verified,
-        phone_verified_at: user.phone_verified_at,
+        user_id: updatedUser.user_id,
+        email: updatedUser.email,
+        role: updatedUser.role,
+        society_id: updatedUser.society_id,
+        phone_verified: updatedUser.phone_verified,
+        phone_verified_at: updatedUser.phone_verified_at,
+        account_status: updatedUser.account_status || "active",
+        force_password_change: updatedUser.force_password_change || false,
       },
       process.env.JWT_SECRET,
       { expiresIn: "1d" }
     );
 
-    res.json({
+    return res.json({
       token,
       user: {
-        user_id: user.user_id,
-        full_name: user.full_name,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        society_id: user.society_id,
+        user_id: updatedUser.user_id,
+        full_name: updatedUser.full_name,
+        email: updatedUser.email,
+        phone: updatedUser.phone,
+        role: updatedUser.role,
+        society_id: updatedUser.society_id,
+        phone_verified: updatedUser.phone_verified,
+        phone_verified_at: updatedUser.phone_verified_at,
+        account_status: updatedUser.account_status || "active",
+        force_password_change: updatedUser.force_password_change || false,
+        last_login_at: updatedUser.last_login_at,
       },
     });
   } catch (err) {
     console.error("Login error:", err);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Login failed",
+      error: err.message,
+    });
+  }
+});
+
+// ==========================================================
+// CHANGE PASSWORD API
+// ==========================================================
+// API: POST /change-password
+// Auth: JWT required
+// Works for: platform_admin, society_admin, buyer, tenant
+// ==========================================================
+
+app.post("/change-password", authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.user_id;
+
+    const { current_password, new_password, confirm_password } = req.body;
+
+    if (!current_password || !new_password || !confirm_password) {
+      return res.status(400).json({
+        message: "current_password, new_password and confirm_password are required",
+      });
+    }
+
+    if (new_password !== confirm_password) {
+      return res.status(400).json({
+        message: "New password and confirm password do not match",
+      });
+    }
+
+    if (String(new_password).length < 8) {
+      return res.status(400).json({
+        message: "New password must be at least 8 characters long",
+      });
+    }
+
+    const userResult = await pool.query(
+      `SELECT 
+         user_id,
+         password,
+         role,
+         account_status,
+         force_password_change
+       FROM users
+       WHERE user_id = $1`,
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    const user = userResult.rows[0];
+    const accountStatus = user.account_status || "active";
+
+    if (accountStatus === "inactive") {
+      return res.status(403).json({
+        message: "Your account is inactive. Contact administrator.",
+      });
+    }
+
+    if (accountStatus === "blocked") {
+      return res.status(403).json({
+        message: "Your account is blocked. Contact support.",
+      });
+    }
+
+    const isCurrentPasswordValid = await bcrypt.compare(
+      current_password,
+      user.password
+    );
+
+    if (!isCurrentPasswordValid) {
+      return res.status(400).json({
+        message: "Current password is incorrect",
+      });
+    }
+
+    const isSamePassword = await bcrypt.compare(new_password, user.password);
+
+    if (isSamePassword) {
+      return res.status(400).json({
+        message: "New password cannot be same as current password",
+      });
+    }
+
+    const hashedNewPassword = await bcrypt.hash(new_password, 10);
+
+    await pool.query(
+      `UPDATE users
+       SET
+         password = $1,
+         force_password_change = false,
+         password_updated_at = CURRENT_TIMESTAMP,
+         failed_login_attempts = 0
+       WHERE user_id = $2`,
+      [hashedNewPassword, userId]
+    );
+
+    return res.status(200).json({
+      message: "Password changed successfully",
+    });
+  } catch (err) {
+    console.error("Change password error:", err);
+
+    return res.status(500).json({
+      message: "Failed to change password",
       error: err.message,
     });
   }
@@ -666,13 +891,28 @@ app.put(
   }
 );
 
+// ==========================================================
+// RESET SOCIETY ADMIN PASSWORD - PLATFORM ADMIN
+// ==========================================================
+// Route:
+// PUT /societies/:id/admin/reset-password
+//
+// Here :id = society_id, not user_id.
+//
+// Purpose:
+// - Platform admin can reset society admin password
+// - If admin was blocked due to failed login attempts,
+//   reset should unblock the account
+// - Force password change after reset
+// ==========================================================
+
 app.put(
   "/societies/:id/admin/reset-password",
   authenticateToken,
   authorizeRoles("platform_admin"),
   async (req, res) => {
     try {
-      const { id } = req.params;
+      const { id } = req.params; // society_id
       const { new_password } = req.body;
 
       if (!new_password) {
@@ -685,22 +925,43 @@ app.put(
 
       const result = await pool.query(
         `UPDATE users
-         SET password = $1
+         SET
+           password = $1,
+           account_status = 'active',
+           failed_login_attempts = 0,
+           force_password_change = true,
+           password_updated_at = CURRENT_TIMESTAMP,
+           deactivated_at = NULL,
+           deactivated_by = NULL
          WHERE society_id = $2
            AND role = 'society_admin'
-         RETURNING user_id`,
+         RETURNING
+           user_id,
+           full_name,
+           email,
+           role,
+           society_id,
+           account_status,
+           failed_login_attempts,
+           force_password_change,
+           password_updated_at`,
         [hashedPassword, id]
       );
 
       if (result.rows.length === 0) {
-        return res.status(404).json({ message: "Admin not found" });
+        return res.status(404).json({
+          message: "Admin not found",
+        });
       }
 
-      res.json({ message: "Password reset successfully" });
+      return res.json({
+        message: "Password reset successfully. Admin account is active now.",
+        admin: result.rows[0],
+      });
     } catch (err) {
       console.error("Error resetting password:", err);
 
-      res.status(500).json({
+      return res.status(500).json({
         message: "Failed to reset password",
         error: err.message,
       });
@@ -2214,7 +2475,14 @@ app.get(
 
 // ==========================================================
 // PATCH /inquiries/:id/status
-// Society admin updates inquiry status with buyer-visible message
+// Society admin updates inquiry status + inserts timeline history
+// ==========================================================
+// Important:
+// - Society admin can update only inquiries from own society
+// - Status update and history insert happen in one transaction
+// - If history insert fails, status update is rolled back
+// - buyer_message is buyer-visible
+// - notes is internal/admin note
 // ==========================================================
 
 app.patch(
@@ -2222,12 +2490,17 @@ app.patch(
   authenticateToken,
   authorizeRoles("society_admin"),
   async (req, res) => {
+    const client = await pool.connect();
+
     try {
       const societyId = req.user.society_id;
       const inquiryId = Number(req.params.id);
 
       const { status, buyer_message, visit_date, visit_time, notes } = req.body;
 
+      // ------------------------------------------------------
+      // Basic auth/society validation
+      // ------------------------------------------------------
       if (!societyId) {
         return res.status(403).json({
           message: "Society admin is not mapped to any society",
@@ -2268,43 +2541,81 @@ app.patch(
 
       if (status === "visit_scheduled" && (!visit_date || !visit_time)) {
         return res.status(400).json({
-          message: "visit_date and visit_time are required when scheduling a visit",
+          message:
+            "visit_date and visit_time are required when scheduling a visit",
         });
       }
 
-      const result = await pool.query(
-        `UPDATE inquiries i
+      await client.query("BEGIN");
+
+      // ------------------------------------------------------
+      // Step 1:
+      // Fetch current inquiry with society isolation.
+      // FOR UPDATE locks row so two admins cannot update same inquiry
+      // at exactly the same time.
+      // ------------------------------------------------------
+      const currentInquiryResult = await client.query(
+        `SELECT
+           i.inquiry_id,
+           i.status AS old_status,
+           i.property_id,
+           i.society_id
+         FROM inquiries i
+         JOIN properties p
+           ON i.property_id = p.prop_id
+         WHERE i.inquiry_id = $1
+           AND i.society_id = $2
+           AND p.society_id = $2
+         FOR UPDATE`,
+        [inquiryId, societyId]
+      );
+
+      if (currentInquiryResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+          message: "Inquiry not found or unauthorized",
+        });
+      }
+
+      const currentInquiry = currentInquiryResult.rows[0];
+      const oldStatus = currentInquiry.old_status;
+
+      // ------------------------------------------------------
+      // Step 2:
+      // Update latest inquiry state.
+      // This keeps the main inquiries table as the current snapshot.
+      // ------------------------------------------------------
+      const updatedInquiryResult = await client.query(
+        `UPDATE inquiries
          SET
            status = $1,
            buyer_message = $2,
-           visit_date = COALESCE($3, i.visit_date),
-           visit_time = COALESCE($4, i.visit_time),
-           notes = COALESCE($5, i.notes),
+           visit_date = COALESCE($3, visit_date),
+           visit_time = COALESCE($4, visit_time),
+           notes = COALESCE($5, notes),
            last_status_updated_at = CURRENT_TIMESTAMP,
            status_updated_by = $6
-         FROM properties p
-         WHERE i.property_id = p.prop_id
-           AND i.inquiry_id = $7
-           AND p.society_id = $8
-           AND i.society_id = $8
+         WHERE inquiry_id = $7
+           AND society_id = $8
          RETURNING
-           i.inquiry_id,
-           i.property_id,
-           i.user_id,
-           i.name AS buyer_name_snapshot,
-           i.phone AS buyer_mobile_snapshot,
-           i.inquiry_type,
-           i.message,
-           i.status,
-           i.buyer_message,
-           i.created_at,
-           i.visit_date,
-           i.visit_time,
-           i.notes,
-           i.mobile_verified,
-           i.mobile_verified_at,
-           i.last_status_updated_at,
-           i.status_updated_by`,
+           inquiry_id,
+           property_id,
+           user_id,
+           name AS buyer_name_snapshot,
+           phone AS buyer_mobile_snapshot,
+           inquiry_type,
+           message,
+           status,
+           buyer_message,
+           created_at,
+           visit_date,
+           visit_time,
+           notes,
+           mobile_verified,
+           mobile_verified_at,
+           last_status_updated_at,
+           status_updated_by`,
         [
           status,
           String(buyer_message).trim(),
@@ -2317,26 +2628,235 @@ app.patch(
         ]
       );
 
-      if (result.rows.length === 0) {
-        return res.status(404).json({
-          message: "Inquiry not found or unauthorized",
-        });
-      }
+      const updatedInquiry = updatedInquiryResult.rows[0];
+     // ------------------------------------------------------
+     // Step 2.1:
+     // If inquiry is marked as deal_closed, close the property.
+     // This keeps dashboard counts and buyer listing correct.
+     // Property remains in DB for admin/reporting history.
+     // ------------------------------------------------------
+     if (status === "deal_closed") {
+     await client.query(
+     `UPDATE properties
+     SET property_status = 'CLOSED'
+     WHERE prop_id = $1
+       AND society_id = $2`,
+     [updatedInquiry.property_id, societyId]
+      );
+     }
+      // ------------------------------------------------------
+      // Step 3:
+      // Insert status history/timeline row.
+      // This preserves audit trail and supports buyer/admin timeline UI.
+      // ------------------------------------------------------
+      const historyResult = await client.query(
+        `INSERT INTO inquiry_status_history
+         (
+           inquiry_id,
+           old_status,
+           new_status,
+           buyer_message,
+           internal_note,
+           visit_date,
+           visit_time,
+           changed_by,
+           changed_at
+         )
+         VALUES
+         ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP)
+         RETURNING
+           history_id,
+           inquiry_id,
+           old_status,
+           new_status,
+           buyer_message,
+           internal_note,
+           visit_date,
+           visit_time,
+           changed_by,
+           changed_at`,
+        [
+          inquiryId,
+          oldStatus,
+          status,
+          String(buyer_message).trim(),
+          notes || null,
+          visit_date || null,
+          visit_time || null,
+          req.user.user_id,
+        ]
+      );
+              // ------------------------------------------------------
+      // Step 4:
+      // Create buyer notification for inquiry update.
+      // Buyer will see this in notification center.
+      // ------------------------------------------------------
+      const notificationType =
+        status === "visit_scheduled"
+          ? "visit_scheduled"
+          : status === "deal_closed"
+          ? "deal_closed"
+          : "inquiry_status_updated";
+
+      await createNotification({
+        user_id: updatedInquiry.user_id,
+        society_id: societyId,
+        notification_type: notificationType,
+
+        title:
+          status === "visit_scheduled"
+            ? "Visit Scheduled"
+            : status === "deal_closed"
+            ? "Deal Closed"
+            : "Inquiry Status Updated",
+
+        message: String(buyer_message).trim(),
+
+        reference_type: "inquiry",
+        reference_id: inquiryId,
+
+        // Important:
+        // Use transaction client so notification and
+        // inquiry update succeed/fail together.
+        client,
+      });
+      await client.query("COMMIT");
 
       return res.status(200).json({
         message: "Inquiry status updated successfully",
-        inquiry: result.rows[0],
+        inquiry: updatedInquiry,
+        history: historyResult.rows[0],
       });
     } catch (err) {
+      await client.query("ROLLBACK");
+
       console.error("Error updating inquiry status:", err);
 
       return res.status(500).json({
         message: "Failed to update inquiry status",
         error: err.message,
       });
+    } finally {
+      client.release();
     }
   }
 );
+
+// ==========================================================
+// GET /inquiries/:id/timeline
+// Inquiry timeline for buyer or society admin
+// ==========================================================
+
+app.get(
+  "/inquiries/:id/timeline",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const inquiryId = Number(req.params.id);
+
+      if (!Number.isInteger(inquiryId) || inquiryId <= 0) {
+        return res.status(400).json({
+          message: "Invalid inquiry id",
+        });
+      }
+
+      let accessResult;
+
+      if (req.user.role === "society_admin") {
+        accessResult = await pool.query(
+          `SELECT i.inquiry_id
+           FROM inquiries i
+           JOIN properties p ON i.property_id = p.prop_id
+           WHERE i.inquiry_id = $1
+             AND i.society_id = $2
+             AND p.society_id = $2`,
+          [inquiryId, req.user.society_id]
+        );
+      } else if (req.user.role === "buyer" || req.user.role === "tenant") {
+        accessResult = await pool.query(
+          `SELECT inquiry_id
+           FROM inquiries
+           WHERE inquiry_id = $1
+             AND user_id = $2`,
+          [inquiryId, req.user.user_id]
+        );
+      } else {
+        return res.status(403).json({
+          message: "Access denied",
+        });
+      }
+
+      if (accessResult.rows.length === 0) {
+        return res.status(404).json({
+          message: "Inquiry not found or unauthorized",
+        });
+      }
+
+      const timelineResult = await pool.query(
+        `SELECT
+           h.history_id,
+           h.inquiry_id,
+           h.old_status,
+           h.new_status,
+           h.buyer_message,
+           h.internal_note,
+           h.visit_date,
+           h.visit_time,
+           h.changed_at,
+           u.full_name AS changed_by_name
+         FROM inquiry_status_history h
+         LEFT JOIN users u ON h.changed_by = u.user_id
+         WHERE h.inquiry_id = $1
+         ORDER BY h.changed_at ASC, h.history_id ASC`,
+        [inquiryId]
+      );
+
+      return res.status(200).json(timelineResult.rows);
+    } catch (err) {
+      console.error("Error fetching inquiry timeline:", err);
+
+      return res.status(500).json({
+        message: "Failed to fetch inquiry timeline",
+        error: err.message,
+      });
+    }
+  }
+);
+
+async function createNotification({
+  user_id,
+  society_id = null,
+  notification_type,
+  title,
+  message,
+  reference_type = "system",
+  reference_id = null,
+  client = pool,
+}) {
+  return client.query(
+    `INSERT INTO notifications
+     (
+       user_id,
+       society_id,
+       notification_type,
+       title,
+       message,
+       reference_type,
+       reference_id
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING notification_id`,
+    [
+      user_id,
+      society_id,
+      notification_type,
+      title,
+      message,
+      reference_type,
+      reference_id,
+    ]
+  );
+}
 
 // ==========================================================
 // OTP + INQUIRY APIs - BUYER/TENANT VERIFIED MOBILE FLOW
@@ -2409,14 +2929,6 @@ function isValidIndianMobile(value) {
   return /^[6-9]\d{9}$/.test(mobile);
 }
 
-// ----------------------------------------------------------
-// Helper: Generate 6-digit OTP as string.
-// Example: "042391" is possible and should remain 6 digits.
-// ----------------------------------------------------------
-function generateSixDigitOtp() {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
-
 // ==========================================================
 // PHONE OTP APIs - BUYER / TENANT MOBILE VERIFICATION
 // ==========================================================
@@ -2427,7 +2939,7 @@ function generateSixDigitOtp() {
 // - Production must never return OTP
 // ==========================================================
 
-// Generate 6 digit OTP as string
+// Generate 6 digit OTP as string. e.g."042391" is possible and should remain 6 digits
 function generateSixDigitOtp() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
@@ -2447,8 +2959,6 @@ app.post(
     const client = await pool.connect();
 
     try {
-          console.log("VERIFY OTP TOKEN USER:", req.user);
-          console.log("VERIFY OTP BODY:", req.body);
       // ------------------------------------------------------
       // Always use logged-in user's phone from users table.
       // Do not trust phone from request body.
@@ -2914,6 +3424,15 @@ app.post(
           user.phone_verified_at,
         ]
       );
+      await createNotification({
+  user_id: req.user.user_id,
+  society_id: property.society_id,
+  notification_type: "inquiry_created",
+  title: "Inquiry Sent Successfully",
+  message: "Your inquiry has been sent to society admin. You will receive updates soon.",
+  reference_type: "inquiry",
+  reference_id: result.rows[0].inquiry_id,
+});
 
       res.status(201).json({
         message: "Inquiry submitted successfully",
@@ -3148,6 +3667,517 @@ app.get(
     }
   }
 );
+// ==========================================================
+// REPORTING DASHBOARD APIs - PHASE 1
+// ==========================================================
+// APIs:
+// 1. GET /dashboard/society
+// 2. GET /dashboard/platform
+//
+// Rules:
+// - Society admin sees ONLY own society data.
+// - Platform admin sees aggregated platform-level data.
+// - No buyer personal data is exposed in platform dashboard.
+// - All queries are parameterized.
+// ==========================================================
+
+// ==========================================================
+// GET /dashboard/society
+// Society Admin Dashboard
+// ==========================================================
+
+app.get(
+  "/dashboard/society",
+  authenticateToken,
+  authorizeRoles("society_admin"),
+  async (req, res) => {
+    try {
+      const societyId = req.user.society_id;
+
+      if (!societyId) {
+        return res.status(403).json({
+          message: "Society admin is not mapped to any society",
+        });
+      }
+
+      // ------------------------------------------------------
+      // Property statistics for logged-in society only
+      // ------------------------------------------------------
+      const propertyStatsResult = await pool.query(
+        `SELECT
+           COUNT(*)::int AS total_properties,
+           COUNT(*) FILTER (WHERE request_type = 'SALE')::int AS sale_properties,
+           COUNT(*) FILTER (WHERE request_type = 'RENT')::int AS rent_properties,
+           COUNT(*) FILTER (WHERE COALESCE(property_status, 'AVAILABLE') = 'AVAILABLE')::int AS available_properties,
+           COUNT(*) FILTER (WHERE property_status = 'CLOSED')::int AS closed_properties
+         FROM properties
+         WHERE society_id = $1`,
+        [societyId]
+      );
+
+      // ------------------------------------------------------
+      // Inquiry statistics for logged-in society only
+      // ------------------------------------------------------
+      const inquiryStatsResult = await pool.query(
+        `SELECT
+           COUNT(*)::int AS total_inquiries,
+           COUNT(*) FILTER (WHERE status = 'requested')::int AS requested_inquiries,
+           COUNT(*) FILTER (WHERE status = 'contacted')::int AS contacted_inquiries,
+           COUNT(*) FILTER (WHERE status = 'visit_scheduled')::int AS visit_scheduled_inquiries,
+           COUNT(*) FILTER (WHERE status = 'deal_closed')::int AS deal_closed_inquiries
+         FROM inquiries
+         WHERE society_id = $1`,
+        [societyId]
+      );
+
+      // ------------------------------------------------------
+      // Recent inquiries for logged-in society only
+      // Safe admin fields only.
+      // ------------------------------------------------------
+      const recentInquiriesResult = await pool.query(
+        `SELECT
+           i.inquiry_id,
+           i.property_id,
+           i.inquiry_type,
+           i.status,
+           i.name AS buyer_name,
+           i.phone AS buyer_phone,
+           i.created_at,
+           i.buyer_message,
+           i.visit_date,
+           i.visit_time,
+
+           p.request_type,
+           p.c_type,
+           p.property_status
+
+         FROM inquiries i
+         JOIN properties p
+           ON i.property_id = p.prop_id
+         WHERE i.society_id = $1
+           AND p.society_id = $1
+         ORDER BY i.created_at DESC, i.inquiry_id DESC
+         LIMIT 10`,
+        [societyId]
+      );
+
+      return res.status(200).json({
+        ...propertyStatsResult.rows[0],
+        ...inquiryStatsResult.rows[0],
+        recent_inquiries: recentInquiriesResult.rows,
+      });
+    } catch (err) {
+      console.error("Society dashboard error:", err);
+
+      return res.status(500).json({
+        message: "Failed to fetch society dashboard",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// ==========================================================
+// GET /dashboard/platform
+// Platform Admin Dashboard - Corrected Aggregation
+// ==========================================================
+// Important fix:
+// - Avoid property × inquiry join multiplication.
+// - KPI totals are calculated independently using subqueries.
+// - society_wise_summary uses COUNT(DISTINCT ...) safely.
+// - No buyer personal data is exposed.
+// ==========================================================
+
+app.get(
+  "/dashboard/platform",
+  authenticateToken,
+  authorizeRoles("platform_admin"),
+  async (req, res) => {
+    try {
+      // ------------------------------------------------------
+      // Platform-level KPI totals
+      // ------------------------------------------------------
+      // These are calculated from base tables independently.
+      // This avoids duplicated counts caused by joining
+      // properties and inquiries together.
+      // ------------------------------------------------------
+      const platformStatsResult = await pool.query(
+        `SELECT
+           -- Society KPIs
+           (SELECT COUNT(*)::int
+            FROM societies) AS total_societies,
+
+           (SELECT COUNT(*)::int
+            FROM societies
+            WHERE status = 'active') AS active_societies_count,
+
+           -- Property KPIs
+           (SELECT COUNT(*)::int
+            FROM properties) AS total_properties,
+
+           (SELECT COUNT(*)::int
+            FROM properties
+            WHERE request_type = 'SALE') AS sale_properties,
+
+           (SELECT COUNT(*)::int
+            FROM properties
+            WHERE request_type = 'RENT') AS rent_properties,
+
+           (SELECT COUNT(*)::int
+            FROM properties
+            WHERE COALESCE(property_status, 'AVAILABLE') <> 'CLOSED'
+            ) AS available_properties,
+           
+          (SELECT COUNT(*)::int
+            FROM properties
+            WHERE property_status = 'CLOSED') AS closed_properties,
+
+           -- Inquiry KPIs
+           (SELECT COUNT(*)::int
+            FROM inquiries) AS total_inquiries,
+
+           (SELECT COUNT(*)::int
+            FROM inquiries
+            WHERE status = 'requested') AS requested_inquiries,
+
+           (SELECT COUNT(*)::int
+            FROM inquiries
+            WHERE status = 'visit_scheduled') AS visit_scheduled_inquiries,
+
+           (SELECT COUNT(*)::int
+            FROM inquiries
+            WHERE status = 'deal_closed') AS deal_closed_inquiries`
+      );
+
+      // ------------------------------------------------------
+      // Society-wise summary
+      // ------------------------------------------------------
+      // Uses COUNT(DISTINCT ...) to avoid duplicated rows caused
+      // by joining societies -> properties -> inquiries.
+      // ------------------------------------------------------
+     
+      const societyWiseResult = await pool.query(
+        `SELECT
+           s.society_id,
+           s.society_name,
+
+           COUNT(DISTINCT p.prop_id)::int AS total_properties,
+
+           COUNT(DISTINCT CASE
+             WHEN p.request_type = 'SALE'
+             THEN p.prop_id
+           END)::int AS sale_properties,
+
+           COUNT(DISTINCT CASE
+             WHEN p.request_type = 'RENT'
+             THEN p.prop_id
+           END)::int AS rent_properties,
+
+           COUNT(DISTINCT CASE
+             WHEN COALESCE(p.property_status, 'AVAILABLE') <> 'CLOSED'
+             THEN p.prop_id
+           END)::int AS available_properties,
+
+           COUNT(DISTINCT CASE
+             WHEN p.property_status = 'CLOSED'
+             THEN p.prop_id
+           END)::int AS closed_properties,
+
+           COUNT(DISTINCT i.inquiry_id)::int AS total_inquiries,
+
+           COUNT(DISTINCT CASE
+             WHEN i.status = 'requested'
+             THEN i.inquiry_id
+           END)::int AS requested_inquiries,
+
+           COUNT(DISTINCT CASE
+             WHEN i.status = 'visit_scheduled'
+             THEN i.inquiry_id
+           END)::int AS visit_scheduled_inquiries,
+
+           COUNT(DISTINCT CASE
+             WHEN i.status = 'deal_closed'
+             THEN i.inquiry_id
+           END)::int AS deal_closed_inquiries
+
+         FROM societies s
+
+         LEFT JOIN properties p
+           ON s.society_id = p.society_id
+
+         LEFT JOIN inquiries i
+           ON p.prop_id = i.property_id
+
+         GROUP BY
+           s.society_id,
+           s.society_name
+
+         ORDER BY
+           total_inquiries DESC,
+           total_properties DESC,
+           s.society_id DESC`
+      );
+
+      return res.status(200).json({
+        ...platformStatsResult.rows[0],
+        society_wise_summary: societyWiseResult.rows,
+      });
+    } catch (err) {
+      console.error("Platform dashboard error:", err);
+
+      return res.status(500).json({
+        message: "Failed to fetch platform dashboard",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// ==========================================================
+// SOCIETY ADMIN REMINDER DASHBOARD
+// API: GET /dashboard/reminders
+// ==========================================================
+// Purpose:
+// - Operational reminder dashboard for society_admin
+// - Helps admin follow up pending/stale inquiries
+//
+// Security:
+// - JWT required
+// - society_admin only
+// - Uses logged-in admin society_id only
+// - No cross-society data exposure
+// ==========================================================
+
+app.get(
+  "/dashboard/reminders",
+  authenticateToken,
+  authorizeRoles("society_admin"),
+  async (req, res) => {
+    try {
+      const societyId = req.user.society_id;
+
+      if (!societyId) {
+        return res.status(403).json({
+          message: "Society admin is not mapped to any society",
+        });
+      }
+
+      // Common SELECT fields used in all reminder queries.
+      // We do not expose owner_contact, admin_notes, or wing_flat_no.
+      const reminderFields = `
+        i.inquiry_id,
+        i.property_id,
+        i.name AS buyer_name,
+        i.phone AS buyer_phone,
+        u.email AS buyer_email,
+        i.inquiry_type,
+        i.status,
+        i.buyer_message,
+        i.visit_date,
+        i.visit_time,
+        i.created_at,
+        i.last_status_updated_at,
+        p.c_type,
+        p.request_type,
+        p.property_status
+      `;
+
+      // 1. Requested inquiries older than 24 hours
+      const pendingFollowups = await pool.query(
+        `SELECT ${reminderFields}
+         FROM inquiries i
+         JOIN properties p ON i.property_id = p.prop_id
+         LEFT JOIN users u ON i.user_id = u.user_id
+         WHERE i.society_id = $1
+           AND p.society_id = $1
+           AND i.status = 'requested'
+           AND i.created_at < CURRENT_TIMESTAMP - INTERVAL '24 hours'
+         ORDER BY i.created_at ASC`,
+        [societyId]
+      );
+
+      // 2. Contacted inquiries older than 2 days, no visit scheduled
+      const contactedNoVisit = await pool.query(
+        `SELECT ${reminderFields}
+         FROM inquiries i
+         JOIN properties p ON i.property_id = p.prop_id
+         LEFT JOIN users u ON i.user_id = u.user_id
+         WHERE i.society_id = $1
+           AND p.society_id = $1
+           AND i.status = 'contacted'
+           AND i.visit_date IS NULL
+           AND COALESCE(i.last_status_updated_at, i.created_at) < CURRENT_TIMESTAMP - INTERVAL '2 days'
+         ORDER BY COALESCE(i.last_status_updated_at, i.created_at) ASC`,
+        [societyId]
+      );
+
+      // 3. Visits scheduled for today
+      const visitsToday = await pool.query(
+        `SELECT ${reminderFields}
+         FROM inquiries i
+         JOIN properties p ON i.property_id = p.prop_id
+         LEFT JOIN users u ON i.user_id = u.user_id
+         WHERE i.society_id = $1
+           AND p.society_id = $1
+           AND i.status = 'visit_scheduled'
+           AND i.visit_date = CURRENT_DATE
+         ORDER BY i.visit_time ASC NULLS LAST`,
+        [societyId]
+      );
+
+      // 4. Visited inquiries older than 3 days, no next action
+      const postVisitFollowups = await pool.query(
+        `SELECT ${reminderFields}
+         FROM inquiries i
+         JOIN properties p ON i.property_id = p.prop_id
+         LEFT JOIN users u ON i.user_id = u.user_id
+         WHERE i.society_id = $1
+           AND p.society_id = $1
+           AND i.status = 'visited'
+           AND COALESCE(i.last_status_updated_at, i.created_at) < CURRENT_TIMESTAMP - INTERVAL '3 days'
+         ORDER BY COALESCE(i.last_status_updated_at, i.created_at) ASC`,
+        [societyId]
+      );
+
+      // 5. Negotiation inquiries stuck for more than 5 days
+      const stuckNegotiations = await pool.query(
+        `SELECT ${reminderFields}
+         FROM inquiries i
+         JOIN properties p ON i.property_id = p.prop_id
+         LEFT JOIN users u ON i.user_id = u.user_id
+         WHERE i.society_id = $1
+           AND p.society_id = $1
+           AND i.status = 'negotiation'
+           AND COALESCE(i.last_status_updated_at, i.created_at) < CURRENT_TIMESTAMP - INTERVAL '5 days'
+         ORDER BY COALESCE(i.last_status_updated_at, i.created_at) ASC`,
+        [societyId]
+      );
+
+      return res.status(200).json({
+        pending_followups: pendingFollowups.rows,
+        contacted_no_visit: contactedNoVisit.rows,
+        visits_today: visitsToday.rows,
+        post_visit_followups: postVisitFollowups.rows,
+        stuck_negotiations: stuckNegotiations.rows,
+      });
+    } catch (err) {
+      console.error("Reminder dashboard error:", err);
+
+      return res.status(500).json({
+        message: "Failed to fetch reminder dashboard",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// ==========================================================
+// NOTIFICATION CENTER APIs
+// ==========================================================
+
+app.get(
+  "/notifications",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `SELECT
+           notification_id,
+           notification_type,
+           title,
+           message,
+           reference_type,
+           reference_id,
+           is_read,
+           read_at,
+           created_at
+         FROM notifications
+         WHERE user_id = $1
+         ORDER BY is_read ASC, created_at DESC`,
+        [req.user.user_id]
+      );
+
+      return res.status(200).json(result.rows);
+    } catch (err) {
+      console.error("Fetch notifications error:", err);
+      return res.status(500).json({
+        message: "Failed to fetch notifications",
+        error: err.message,
+      });
+    }
+  }
+);
+
+app.patch(
+  "/notifications/:id/read",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const notificationId = Number(req.params.id);
+
+      if (!Number.isInteger(notificationId) || notificationId <= 0) {
+        return res.status(400).json({ message: "Invalid notification id" });
+      }
+
+      const result = await pool.query(
+        `UPDATE notifications
+         SET is_read = true,
+             read_at = CURRENT_TIMESTAMP
+         WHERE notification_id = $1
+           AND user_id = $2
+         RETURNING *`,
+        [notificationId, req.user.user_id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Notification not found or unauthorized",
+        });
+      }
+
+      return res.status(200).json({
+        message: "Notification marked as read",
+        notification: result.rows[0],
+      });
+    } catch (err) {
+      console.error("Mark notification read error:", err);
+      return res.status(500).json({
+        message: "Failed to mark notification as read",
+        error: err.message,
+      });
+    }
+  }
+);
+
+app.patch(
+  "/notifications/read-all",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `UPDATE notifications
+         SET is_read = true,
+             read_at = CURRENT_TIMESTAMP
+         WHERE user_id = $1
+           AND is_read = false
+         RETURNING notification_id`,
+        [req.user.user_id]
+      );
+
+      return res.status(200).json({
+        message: "All notifications marked as read",
+        updated_count: result.rows.length,
+      });
+    } catch (err) {
+      console.error("Mark all notifications read error:", err);
+      return res.status(500).json({
+        message: "Failed to mark all notifications as read",
+        error: err.message,
+      });
+    }
+  }
+);
+
 // ==========================================================
 // HEALTH CHECK
 // ==========================================================

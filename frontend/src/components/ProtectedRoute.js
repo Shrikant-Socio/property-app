@@ -1,37 +1,49 @@
-// Import Navigate for redirection
-import { Navigate } from 'react-router-dom';
+// ------------------------------------------------------------
+// ProtectedRoute.js
+// ------------------------------------------------------------
+// SocioDeal Route Guard
+//
+// Purpose:
+// - Prevent unauthenticated access.
+// - Enforce role-based access.
+// - Enforce force_password_change security rule.
+//
+// Important:
+// If user.force_password_change = true,
+// user can access ONLY /change-password.
+// ------------------------------------------------------------
 
-/*
-  ProtectedRoute component
+import { Navigate, useLocation } from 'react-router-dom';
 
-  Purpose:
-  - Prevent unauthorized access to certain pages
-  - Allow only logged-in users
-  - Optionally restrict by role (e.g., society_admin)
-
-  Usage:
-  <ProtectedRoute role="society_admin">
-      <AddProperty />
-  </ProtectedRoute>
-*/
 export default function ProtectedRoute({ children, role }) {
+  const location = useLocation();
 
-  // Get token from localStorage
   const token = localStorage.getItem('token');
 
-  // Get user object (contains role, name, etc.)
-  const user = JSON.parse(localStorage.getItem('user'));
+  let user = null;
 
-  // 🔒 If user is NOT logged in → redirect to login page
-  if (!token) {
-    return <Navigate to="/login" />;
+  try {
+    user = JSON.parse(localStorage.getItem('user'));
+  } catch {
+    user = null;
   }
 
-  // 🔒 If role is required AND user role doesn't match → redirect
+  if (!token || !user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  const currentPath = location.pathname;
+
+  if (
+    user.force_password_change === true &&
+    currentPath !== '/change-password'
+  ) {
+    return <Navigate to="/change-password" replace />;
+  }
+
   if (role && user?.role !== role) {
-    return <Navigate to="/properties" />;
+    return <Navigate to="/properties" replace />;
   }
 
-  // ✅ If everything is valid → render the requested page
   return children;
 }
