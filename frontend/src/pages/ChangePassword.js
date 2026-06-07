@@ -9,11 +9,11 @@
 // - Calls POST /change-password with JWT token.
 // ------------------------------------------------------------
 
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import api from '../services/api';
+ import { useState } from 'react';
+ import { useNavigate } from 'react-router-dom';
+ import api from '../services/api';
 
-export default function ChangePassword() {
+ export default function ChangePassword() {
   const navigate = useNavigate();
 
   const token = localStorage.getItem('token');

@@ -6,7 +6,9 @@
 // Purpose:
 // - Defines all frontend routes.
 // - Keeps role-based access protected.
-// - Adds /change-password route for forced password updates.
+// - Adds:
+//   1. /change-password for authenticated forced password updates
+//   2. /forgot-password for public password recovery
 // ------------------------------------------------------------
 
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
@@ -31,6 +33,7 @@ import SocietyDashboard from './pages/SocietyDashboard';
 import PlatformDashboard from './pages/PlatformDashboard';
 import SocietyReminders from './pages/SocietyReminders';
 import ChangePassword from './pages/ChangePassword';
+import ForgotPassword from './pages/ForgotPassword';
 
 import ProtectedRoute from './components/ProtectedRoute';
 
@@ -48,6 +51,9 @@ function App() {
         {/* Auth routes */}
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
+
+        {/* Public password recovery route */}
+        <Route path="/forgot-password" element={<ForgotPassword />} />
 
         {/* Authenticated password change route */}
         <Route

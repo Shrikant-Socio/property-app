@@ -8,6 +8,7 @@
 // - Stores JWT token and user object.
 // - If backend returns user.force_password_change = true,
 //   redirects immediately to /change-password before any dashboard.
+// - Adds Forgot Password link.
 // ------------------------------------------------------------
 
 import { useState } from 'react';
@@ -25,9 +26,6 @@ export default function Login() {
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  // ------------------------------------------------------------
-  // Decide where user should go after normal login
-  // ------------------------------------------------------------
   const getRedirectPath = (role) => {
     const normalizedRole = String(role || '').trim().toLowerCase();
 
@@ -37,9 +35,6 @@ export default function Login() {
     return '/properties';
   };
 
-  // ------------------------------------------------------------
-  // Update form state
-  // ------------------------------------------------------------
   const handleChange = (e) => {
     setFormData((current) => ({
       ...current,
@@ -49,9 +44,6 @@ export default function Login() {
     setMessage('');
   };
 
-  // ------------------------------------------------------------
-  // Login submit
-  // ------------------------------------------------------------
   const handleLogin = async (e) => {
     e.preventDefault();
 
@@ -69,17 +61,9 @@ export default function Login() {
         return;
       }
 
-      // Store token and user first so /change-password route can access token.
       localStorage.setItem('token', token);
       localStorage.setItem('user', JSON.stringify(user));
 
-      // --------------------------------------------------------
-      // HIGH PRIORITY SECURITY CHECK
-      // If platform admin reset password, backend sends:
-      // user.force_password_change = true
-      //
-      // User must be sent to /change-password immediately.
-      // --------------------------------------------------------
       const forcePasswordChange =
         user.force_password_change === true ||
         user.force_password_change === 'true';
@@ -89,7 +73,6 @@ export default function Login() {
         return;
       }
 
-      // Normal login redirect
       navigate(getRedirectPath(user.role), { replace: true });
     } catch (error) {
       console.error('Login error:', error);
@@ -124,6 +107,18 @@ export default function Login() {
             onChange={handleChange}
             required
           />
+
+          <div style={{ textAlign: 'right', marginTop: '-8px', marginBottom: '14px' }}>
+            <Link
+              to="/forgot-password"
+              style={{
+                fontSize: '14px',
+                fontWeight: '800'
+              }}
+            >
+              Forgot Password?
+            </Link>
+          </div>
 
           <button
             className="btn btn-primary"

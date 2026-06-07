@@ -20,8 +20,9 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const jwt = require("jsonwebtoken");
 const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
 const pool = require("./db");
 
@@ -148,6 +149,49 @@ function getCompatibilityPrice(requestType, expectedPrice, expectedRent) {
   }
 
   return 0;
+}
+
+// ==========================================================
+// AUDIT LOG HELPER
+// ==========================================================
+// Purpose:
+// - Records sensitive admin actions
+// - Never store passwords or password hashes in metadata
+// ==========================================================
+
+async function createAuditLog({
+  actor_user_id,
+  actor_role,
+  action_type,
+  target_type,
+  target_id,
+  society_id = null,
+  metadata = {},
+  client = pool,
+}) {
+  return client.query(
+    `INSERT INTO audit_logs
+     (
+       actor_user_id,
+       actor_role,
+       action_type,
+       target_type,
+       target_id,
+       society_id,
+       metadata,
+       created_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, CURRENT_TIMESTAMP)`,
+    [
+      actor_user_id,
+      actor_role,
+      action_type,
+      target_type,
+      target_id,
+      society_id,
+      JSON.stringify(metadata || {}),
+    ]
+  );
 }
 
 // ==========================================================
@@ -509,6 +553,427 @@ app.post("/change-password", authenticateToken, async (req, res) => {
       message: "Failed to change password",
       error: err.message,
     });
+  }
+});
+
+app.post("/forgot-password/send-otp", async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { identifier } = req.body;
+
+    if (!identifier) {
+      return res.status(400).json({
+        message: "identifier is required",
+      });
+    }
+
+    const normalizedIdentifier = String(identifier).trim().toLowerCase();
+
+    const userResult = await client.query(
+      `SELECT user_id, email, phone, role, account_status
+       FROM users
+       WHERE LOWER(email) = $1
+          OR phone = $2
+       LIMIT 1`,
+      [normalizedIdentifier, normalizedIdentifier]
+    );
+
+    // Prevent account enumeration
+    if (userResult.rows.length === 0) {
+      return res.status(200).json({
+        message: "If account exists, OTP has been sent.",
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    // Do not reveal inactive/blocked users
+    if ((user.account_status || "active") !== "active") {
+      return res.status(200).json({
+        message: "If account exists, OTP has been sent.",
+      });
+    }
+
+    // Max 3 OTP requests in 15 minutes
+    const recentOtpResult = await client.query(
+      `SELECT COUNT(*)::int AS total
+       FROM otp_verifications
+       WHERE user_id = $1
+         AND purpose = 'forgot_password'
+         AND created_at > CURRENT_TIMESTAMP - INTERVAL '15 minutes'`,
+      [user.user_id]
+    );
+
+    if (recentOtpResult.rows[0].total >= 3) {
+      return res.status(429).json({
+        message: "Too many OTP requests. Please try again later.",
+      });
+    }
+
+    const otp = generateSixDigitOtp();
+    const otpHash = await bcrypt.hash(otp, 10);
+
+    await client.query("BEGIN");
+
+    await client.query(
+      `UPDATE otp_verifications
+       SET status = 'cancelled',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = $1
+         AND purpose = 'forgot_password'
+         AND status = 'pending'`,
+      [user.user_id]
+    );
+
+    await client.query(
+      `INSERT INTO otp_verifications
+       (
+         user_id,
+         phone,
+         identifier,
+         otp_hash,
+         purpose,
+         expires_at,
+         attempts,
+         status,
+         created_at,
+         updated_at
+       )
+       VALUES
+       (
+         $1,
+         $2,
+         $3,
+         $4,
+         'forgot_password',
+         CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+         0,
+         'pending',
+         CURRENT_TIMESTAMP,
+         CURRENT_TIMESTAMP
+       )`,
+      [
+        user.user_id,
+        user.phone || normalizedIdentifier,
+        normalizedIdentifier,
+        otpHash,
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    const response = {
+      message: "If account exists, OTP has been sent.",
+    };
+
+    if (process.env.NODE_ENV !== "production") {
+      response.dev_otp = otp;
+    }
+
+    return res.status(200).json(response);
+  } catch (err) {
+    await client.query("ROLLBACK");
+
+    console.error("Forgot password send OTP error:", err);
+
+    return res.status(500).json({
+      message: "Failed to process forgot password request",
+      error: err.message,
+    });
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/forgot-password/verify-otp", async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { identifier, otp } = req.body;
+
+    if (!identifier || !otp) {
+      return res.status(400).json({
+        message: "identifier and otp are required",
+      });
+    }
+
+    const normalizedIdentifier = String(identifier)
+      .trim()
+      .toLowerCase();
+
+    const enteredOtp = String(otp).trim();
+
+    if (!/^\d{6}$/.test(enteredOtp)) {
+      return res.status(400).json({
+        message: "OTP must be a 6-digit number",
+      });
+    }
+
+    await client.query("BEGIN");
+
+    const otpResult = await client.query(
+      `SELECT
+         o.otp_id,
+         o.user_id,
+         o.otp_hash,
+         o.expires_at,
+         o.attempts,
+         u.account_status
+       FROM otp_verifications o
+       JOIN users u
+         ON o.user_id = u.user_id
+       WHERE o.identifier = $1
+         AND o.purpose = 'forgot_password'
+         AND o.status = 'pending'
+       ORDER BY o.otp_id DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [normalizedIdentifier]
+    );
+
+    if (otpResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        message: "Invalid or expired OTP",
+      });
+    }
+
+    const otpRow = otpResult.rows[0];
+
+    if ((otpRow.account_status || "active") !== "active") {
+      await client.query("ROLLBACK");
+
+      return res.status(403).json({
+        message: "Account is not active",
+      });
+    }
+
+    if (new Date(otpRow.expires_at) <= new Date()) {
+      await client.query(
+        `UPDATE otp_verifications
+         SET status = 'expired',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE otp_id = $1`,
+        [otpRow.otp_id]
+      );
+
+      await client.query("COMMIT");
+
+      return res.status(400).json({
+        message: "OTP expired",
+      });
+    }
+
+    const isOtpValid = await bcrypt.compare(
+      enteredOtp,
+      otpRow.otp_hash
+    );
+
+    if (!isOtpValid) {
+      const newAttempts =
+        Number(otpRow.attempts || 0) + 1;
+
+      const newStatus =
+        newAttempts >= 5 ? "failed" : "pending";
+
+      await client.query(
+        `UPDATE otp_verifications
+         SET attempts = $1,
+             status = $2,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE otp_id = $3`,
+        [
+          newAttempts,
+          newStatus,
+          otpRow.otp_id,
+        ]
+      );
+
+      await client.query("COMMIT");
+
+      return res.status(400).json({
+        message:
+          newStatus === "failed"
+            ? "Maximum OTP attempts exceeded. Please request a new OTP."
+            : "Invalid OTP",
+        attempts_remaining: Math.max(
+          0,
+          5 - newAttempts
+        ),
+      });
+    }
+
+    const resetToken = generateResetToken();
+
+    await client.query(
+      `UPDATE otp_verifications
+       SET
+         status = 'verified',
+         verified_at = CURRENT_TIMESTAMP,
+         reset_token = $1,
+         reset_token_expires_at =
+           CURRENT_TIMESTAMP + INTERVAL '15 minutes',
+         updated_at = CURRENT_TIMESTAMP
+       WHERE otp_id = $2`,
+      [resetToken, otpRow.otp_id]
+    );
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      message: "OTP verified successfully",
+      reset_token: resetToken,
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+
+    console.error(
+      "Forgot password verify OTP error:",
+      err
+    );
+
+    return res.status(500).json({
+      message: "Failed to verify OTP",
+      error: err.message,
+    });
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/forgot-password/reset", async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    const { reset_token, new_password, confirm_password } = req.body;
+
+    if (!reset_token || !new_password || !confirm_password) {
+      return res.status(400).json({
+        message: "reset_token, new_password and confirm_password are required",
+      });
+    }
+
+    if (new_password !== confirm_password) {
+      return res.status(400).json({
+        message: "New password and confirm password do not match",
+      });
+    }
+
+    if (String(new_password).length < 8) {
+      return res.status(400).json({
+        message: "New password must be at least 8 characters long",
+      });
+    }
+
+    await client.query("BEGIN");
+
+    const tokenResult = await client.query(
+      `SELECT
+         o.otp_id,
+         o.user_id,
+         o.reset_token_expires_at,
+         o.used_at,
+         u.password,
+         u.account_status
+       FROM otp_verifications o
+       JOIN users u
+         ON o.user_id = u.user_id
+       WHERE o.reset_token = $1
+         AND o.purpose = 'forgot_password'
+         AND o.status = 'verified'
+       LIMIT 1
+       FOR UPDATE`,
+      [reset_token]
+    );
+
+    if (tokenResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        message: "Invalid or expired reset token",
+      });
+    }
+
+    const tokenRow = tokenResult.rows[0];
+
+    if (tokenRow.used_at) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        message: "Reset token already used",
+      });
+    }
+
+    if (new Date(tokenRow.reset_token_expires_at) <= new Date()) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        message: "Reset token expired",
+      });
+    }
+
+    if ((tokenRow.account_status || "active") !== "active") {
+      await client.query("ROLLBACK");
+
+      return res.status(403).json({
+        message: "Account is not active",
+      });
+    }
+
+    const isSamePassword = await bcrypt.compare(
+      new_password,
+      tokenRow.password
+    );
+
+    if (isSamePassword) {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        message: "New password cannot be same as current password",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(new_password, 10);
+
+    await client.query(
+      `UPDATE users
+       SET
+         password = $1,
+         force_password_change = false,
+         failed_login_attempts = 0,
+         password_updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = $2`,
+      [hashedPassword, tokenRow.user_id]
+    );
+
+    await client.query(
+      `UPDATE otp_verifications
+       SET
+         status = 'used',
+         used_at = CURRENT_TIMESTAMP,
+         updated_at = CURRENT_TIMESTAMP
+       WHERE otp_id = $1`,
+      [tokenRow.otp_id]
+    );
+
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      message: "Password reset successfully. Please login.",
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+
+    console.error("Forgot password reset error:", err);
+
+    return res.status(500).json({
+      message: "Failed to reset password",
+      error: err.message,
+    });
+  } finally {
+    client.release();
   }
 });
 
@@ -965,6 +1430,566 @@ app.put(
         message: "Failed to reset password",
         error: err.message,
       });
+    }
+  }
+);
+
+// ==========================================================
+// PLATFORM ADMIN - SOCIETY ADMIN ACCESS MANAGEMENT
+// ==========================================================
+// New production-grade APIs:
+// - Reset society admin password by user_id
+// - Deactivate society admin
+// - Reactivate society admin
+//
+// IMPORTANT:
+// Existing old route /societies/:id/admin/reset-password can remain
+// for backward compatibility with current frontend.
+// ==========================================================
+
+// ==========================================================
+// 1) RESET SOCIETY ADMIN PASSWORD BY USER ID
+// API: POST /platform-admin/admins/:id/reset-password
+// ==========================================================
+
+app.post(
+  "/platform-admin/admins/:id/reset-password",
+  authenticateToken,
+  authorizeRoles("platform_admin"),
+  async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const adminUserId = Number(req.params.id);
+      const { temporary_password } = req.body;
+
+      if (!Number.isInteger(adminUserId) || adminUserId <= 0) {
+        return res.status(400).json({
+          message: "Invalid admin user id",
+        });
+      }
+
+      if (!temporary_password || String(temporary_password).length < 8) {
+        return res.status(400).json({
+          message: "temporary_password is required and must be at least 8 characters",
+        });
+      }
+
+      await client.query("BEGIN");
+
+      const targetResult = await client.query(
+        `SELECT user_id, full_name, email, role, society_id, account_status
+         FROM users
+         WHERE user_id = $1
+         FOR UPDATE`,
+        [adminUserId]
+      );
+
+      if (targetResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ message: "Admin user not found" });
+      }
+
+      const targetAdmin = targetResult.rows[0];
+
+      if (targetAdmin.role !== "society_admin") {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: "Password reset is allowed only for society_admin users",
+        });
+      }
+
+      const hashedPassword = await bcrypt.hash(temporary_password, 10);
+
+      const updatedResult = await client.query(
+        `UPDATE users
+         SET
+           password = $1,
+           force_password_change = true,
+           password_updated_at = CURRENT_TIMESTAMP,
+           failed_login_attempts = 0,
+           account_status = 'active',
+           deactivated_at = NULL,
+           deactivated_by = NULL
+         WHERE user_id = $2
+           AND role = 'society_admin'
+         RETURNING
+           user_id,
+           full_name,
+           email,
+           role,
+           society_id,
+           account_status,
+           force_password_change,
+           failed_login_attempts,
+           password_updated_at`,
+        [hashedPassword, adminUserId]
+      );
+
+      await createAuditLog({
+        actor_user_id: req.user.user_id,
+        actor_role: req.user.role,
+        action_type: "admin_password_reset",
+        target_type: "user",
+        target_id: adminUserId,
+        society_id: targetAdmin.society_id,
+        metadata: {
+          target_email: targetAdmin.email,
+          reset_method: "platform_admin_manual_reset",
+        },
+        client,
+      });
+
+      await client.query("COMMIT");
+
+      return res.status(200).json({
+        success: true,
+        message: "Temporary password set successfully",
+        admin: updatedResult.rows[0],
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+
+      console.error("Platform admin reset password error:", err);
+
+      return res.status(500).json({
+        message: "Failed to reset admin password",
+        error: err.message,
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+
+// ==========================================================
+// 2) DEACTIVATE SOCIETY ADMIN
+// API: PATCH /platform-admin/admins/:id/deactivate
+// ==========================================================
+
+app.patch(
+  "/platform-admin/admins/:id/deactivate",
+  authenticateToken,
+  authorizeRoles("platform_admin"),
+  async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const adminUserId = Number(req.params.id);
+
+      if (!Number.isInteger(adminUserId) || adminUserId <= 0) {
+        return res.status(400).json({
+          message: "Invalid admin user id",
+        });
+      }
+
+      await client.query("BEGIN");
+
+      const targetResult = await client.query(
+        `SELECT user_id, full_name, email, role, society_id, account_status
+         FROM users
+         WHERE user_id = $1
+         FOR UPDATE`,
+        [adminUserId]
+      );
+
+      if (targetResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ message: "Admin user not found" });
+      }
+
+      const targetAdmin = targetResult.rows[0];
+
+      if (targetAdmin.role !== "society_admin") {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: "Only society_admin users can be deactivated using this API",
+        });
+      }
+
+      if (targetAdmin.account_status === "inactive") {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: "Admin is already inactive",
+        });
+      }
+
+      const updatedResult = await client.query(
+        `UPDATE users
+         SET
+           account_status = 'inactive',
+           deactivated_at = CURRENT_TIMESTAMP,
+           deactivated_by = $1
+         WHERE user_id = $2
+           AND role = 'society_admin'
+         RETURNING
+           user_id,
+           full_name,
+           email,
+           role,
+           society_id,
+           account_status,
+           deactivated_at,
+           deactivated_by`,
+        [req.user.user_id, adminUserId]
+      );
+
+      await createAuditLog({
+        actor_user_id: req.user.user_id,
+        actor_role: req.user.role,
+        action_type: "admin_deactivated",
+        target_type: "user",
+        target_id: adminUserId,
+        society_id: targetAdmin.society_id,
+        metadata: {
+          target_email: targetAdmin.email,
+          previous_status: targetAdmin.account_status || "active",
+        },
+        client,
+      });
+
+      await client.query("COMMIT");
+
+      return res.status(200).json({
+        message: "Admin deactivated successfully",
+        admin: updatedResult.rows[0],
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+
+      console.error("Deactivate admin error:", err);
+
+      return res.status(500).json({
+        message: "Failed to deactivate admin",
+        error: err.message,
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ==========================================================
+// 3) REACTIVATE SOCIETY ADMIN
+// API: PATCH /platform-admin/admins/:id/reactivate
+// ==========================================================
+
+app.patch(
+  "/platform-admin/admins/:id/reactivate",
+  authenticateToken,
+  authorizeRoles("platform_admin"),
+  async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const adminUserId = Number(req.params.id);
+
+      if (!Number.isInteger(adminUserId) || adminUserId <= 0) {
+        return res.status(400).json({
+          message: "Invalid admin user id",
+        });
+      }
+
+      await client.query("BEGIN");
+
+      const targetResult = await client.query(
+        `SELECT user_id, full_name, email, role, society_id, account_status
+         FROM users
+         WHERE user_id = $1
+         FOR UPDATE`,
+        [adminUserId]
+      );
+
+      if (targetResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ message: "Admin user not found" });
+      }
+
+      const targetAdmin = targetResult.rows[0];
+
+      if (targetAdmin.role !== "society_admin") {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: "Only society_admin users can be reactivated using this API",
+        });
+      }
+
+      const updatedResult = await client.query(
+        `UPDATE users
+         SET
+           account_status = 'active',
+           deactivated_at = NULL,
+           deactivated_by = NULL,
+           failed_login_attempts = 0
+         WHERE user_id = $1
+           AND role = 'society_admin'
+         RETURNING
+           user_id,
+           full_name,
+           email,
+           role,
+           society_id,
+           account_status,
+           failed_login_attempts,
+           deactivated_at,
+           deactivated_by`,
+        [adminUserId]
+      );
+
+      await createAuditLog({
+        actor_user_id: req.user.user_id,
+        actor_role: req.user.role,
+        action_type: "admin_reactivated",
+        target_type: "user",
+        target_id: adminUserId,
+        society_id: targetAdmin.society_id,
+        metadata: {
+          target_email: targetAdmin.email,
+          previous_status: targetAdmin.account_status || "inactive",
+        },
+        client,
+      });
+
+      await client.query("COMMIT");
+
+      return res.status(200).json({
+        message: "Admin reactivated successfully",
+        admin: updatedResult.rows[0],
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+
+      console.error("Reactivate admin error:", err);
+
+      return res.status(500).json({
+        message: "Failed to reactivate admin",
+        error: err.message,
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// ==========================================================
+// REPLACE SOCIETY ADMIN
+// API: POST /platform-admin/societies/:societyId/replace-admin
+// ==========================================================
+// Purpose:
+// - Create a new society_admin for the same society
+// - Deactivate the old society_admin
+// - Preserve audit/history
+// - Force new admin to change password on first login
+// ==========================================================
+
+app.post(
+  "/platform-admin/societies/:societyId/replace-admin",
+  authenticateToken,
+  authorizeRoles("platform_admin"),
+  async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+      const societyId = Number(req.params.societyId);
+
+      const {
+        old_admin_user_id,
+        full_name,
+        email,
+        phone,
+        temporary_password,
+      } = req.body;
+
+      if (!Number.isInteger(societyId) || societyId <= 0) {
+        return res.status(400).json({
+          message: "Invalid society id",
+        });
+      }
+
+      if (!old_admin_user_id || !full_name || !email || !temporary_password) {
+        return res.status(400).json({
+          message:
+            "old_admin_user_id, full_name, email and temporary_password are required",
+        });
+      }
+
+      if (String(temporary_password).length < 8) {
+        return res.status(400).json({
+          message: "temporary_password must be at least 8 characters",
+        });
+      }
+
+      await client.query("BEGIN");
+
+      // Validate society exists
+      const societyResult = await client.query(
+        `SELECT society_id, society_name
+         FROM societies
+         WHERE society_id = $1`,
+        [societyId]
+      );
+
+      if (societyResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({
+          message: "Society not found",
+        });
+      }
+
+      // Validate old admin belongs to this society
+      const oldAdminResult = await client.query(
+        `SELECT user_id, full_name, email, role, society_id, account_status
+         FROM users
+         WHERE user_id = $1
+           AND society_id = $2
+         FOR UPDATE`,
+        [old_admin_user_id, societyId]
+      );
+
+      if (oldAdminResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({
+          message: "Old admin not found for this society",
+        });
+      }
+
+      const oldAdmin = oldAdminResult.rows[0];
+
+      if (oldAdmin.role !== "society_admin") {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          message: "Old admin must be a society_admin",
+        });
+      }
+
+      const hashedPassword = await bcrypt.hash(temporary_password, 10);
+
+      // Create new society admin
+      const newAdminResult = await client.query(
+        `INSERT INTO users
+         (
+           full_name,
+           email,
+           phone,
+           password,
+           role,
+           society_id,
+           account_status,
+           force_password_change,
+           password_updated_at,
+           failed_login_attempts
+         )
+         VALUES
+         (
+           $1,
+           $2,
+           $3,
+           $4,
+           'society_admin',
+           $5,
+           'active',
+           true,
+           CURRENT_TIMESTAMP,
+           0
+         )
+         RETURNING
+           user_id,
+           full_name,
+           email,
+           phone,
+           role,
+           society_id,
+           account_status,
+           force_password_change,
+           password_updated_at`,
+        [
+          full_name,
+          email,
+          phone || null,
+          hashedPassword,
+          societyId,
+        ]
+      );
+
+      const newAdmin = newAdminResult.rows[0];
+
+      // Deactivate old admin but keep history intact
+      const oldAdminUpdateResult = await client.query(
+        `UPDATE users
+         SET
+           account_status = 'inactive',
+           deactivated_at = CURRENT_TIMESTAMP,
+           deactivated_by = $1
+         WHERE user_id = $2
+           AND role = 'society_admin'
+         RETURNING
+           user_id,
+           full_name,
+           email,
+           role,
+           society_id,
+           account_status,
+           deactivated_at,
+           deactivated_by`,
+        [req.user.user_id, old_admin_user_id]
+      );
+
+      // Audit log - never store password or hash
+      await createAuditLog({
+        actor_user_id: req.user.user_id,
+        actor_role: req.user.role,
+        action_type: "society_admin_replaced",
+        target_type: "user",
+        target_id: old_admin_user_id,
+        society_id: societyId,
+        metadata: {
+          old_admin_email: oldAdmin.email,
+          new_admin_user_id: newAdmin.user_id,
+          new_admin_email: newAdmin.email,
+          society_name: societyResult.rows[0].society_name,
+        },
+        client,
+      });
+
+      await client.query("COMMIT");
+
+      return res.status(201).json({
+        message: "Society admin replaced successfully",
+        old_admin: oldAdminUpdateResult.rows[0],
+        new_admin: newAdmin,
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+
+      console.error("Replace society admin error:", err);
+
+      if (err.code === "23505") {
+        const detail = err.detail || "";
+
+        if (detail.includes("email")) {
+          return res.status(400).json({
+            message: "Email is already registered",
+          });
+        }
+
+        if (detail.includes("phone")) {
+          return res.status(400).json({
+            message: "Mobile number is already registered with another user",
+          });
+        }
+
+        return res.status(400).json({
+          message: "New admin already exists with provided details",
+        });
+      }
+
+      return res.status(500).json({
+        message: "Failed to replace society admin",
+        error: err.message,
+      });
+    } finally {
+      client.release();
     }
   }
 );
@@ -2858,6 +3883,8 @@ async function createNotification({
   );
 }
 
+
+
 // ==========================================================
 // OTP + INQUIRY APIs - BUYER/TENANT VERIFIED MOBILE FLOW
 // ==========================================================
@@ -2942,6 +3969,14 @@ function isValidIndianMobile(value) {
 // Generate 6 digit OTP as string. e.g."042391" is possible and should remain 6 digits
 function generateSixDigitOtp() {
   return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// ==========================================================
+// GENERATE SECURE RESET TOKEN
+// Used for forgot-password flow
+// ==========================================================
+function generateResetToken() {
+  return crypto.randomBytes(32).toString("hex");
 }
 
 // ==========================================================
@@ -3143,7 +4178,7 @@ app.post(
     message: "Mobile number is already verified. OTP verification is not required.",
     phone_verified: true,
   });
-}
+ }
 
       await client.query("BEGIN");
 
